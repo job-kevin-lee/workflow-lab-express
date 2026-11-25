@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
   isRecord,
+  type JsonObject,
   type NodeInput,
   type WorkflowNodeContext,
   type WorkflowNodeRegistration
@@ -16,7 +17,7 @@ const previousGuess: NodeInput = {
   example: { value: 42 }
 }
 
-function compareGuess({ runId, inputs }: WorkflowNodeContext): {
+function compareGuess({ runId, workflowRunId, inputs }: WorkflowNodeContext): {
   value: number
   answer: number
   correct: boolean
@@ -27,7 +28,10 @@ function compareGuess({ runId, inputs }: WorkflowNodeContext): {
     throw new Error('The previous guess must contain a numeric value.')
   }
   const { minimum, maximum } = numberGame
-  const seed = createHash('sha256').update('workflow-lab:guess-number:').update(runId).digest()
+  const seed = createHash('sha256')
+    .update('workflow-lab:guess-number:')
+    .update(workflowRunId ?? runId)
+    .digest()
   const answer = minimum + (seed.readUInt32BE(0) % (maximum - minimum + 1))
   return {
     value: guess.value,
@@ -97,5 +101,58 @@ export const finishGuess: WorkflowNodeRegistration = {
         value: { guess: value, answer, correct }
       }
     }
+  }
+}
+
+function guessAttempt(input: JsonObject): number {
+  const { index } = input
+  return typeof index === 'number' && Number.isInteger(index) && index >= 0 ? index + 1 : 1
+}
+
+export const guessPrompt: WorkflowNodeRegistration = {
+  descriptor: {
+    type: numberGame.promptType,
+    version: 1,
+    label: 'Guess Prompt',
+    category: 'Custom Nodes',
+    description: 'Show the hint and number of attempts remaining.',
+    outputs: [{ key: 'text', label: 'Next prompt', type: 'string', required: true }],
+    ports: [{ id: 'next', label: 'Continue' }]
+  },
+  execute({ input }) {
+    const attempt = guessAttempt(input)
+    const previous = input.previous
+    const hint =
+      isRecord(previous) && typeof previous.hint === 'string'
+        ? previous.hint
+        : `I picked a whole number from ${numberGame.minimum} to ${numberGame.maximum}.`
+    return { port: 'next', output: { text: `${hint} Guess ${attempt} of ${numberGame.attempts}.` } }
+  }
+}
+
+export const checkGuess: WorkflowNodeRegistration = {
+  descriptor: {
+    type: numberGame.checkType,
+    version: 1,
+    label: 'Check Guess',
+    category: 'Custom Nodes',
+    description: 'Compare a guess and return a hint or the final result.',
+    inputs: [previousGuess],
+    outputs: [
+      { key: 'correct', label: 'Correct', type: 'boolean', required: true },
+      { key: 'hint', label: 'Next hint', type: 'string', required: true },
+      { key: 'message', label: 'Result message', type: 'string', required: true }
+    ],
+    ports: []
+  },
+  execute(context) {
+    const attempt = guessAttempt(context.input)
+    const { correct, answer, hint } = compareGuess(context)
+    const message = correct
+      ? `You guessed ${answer} on attempt ${attempt}.`
+      : attempt >= numberGame.attempts
+        ? `${hint} You used all ${numberGame.attempts} guesses. The number was ${answer}.`
+        : hint
+    return { port: null, output: { correct, hint, message } }
   }
 }

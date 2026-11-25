@@ -799,6 +799,68 @@
   font: 11px/1.45 var(--wf-code);
 }
 
+.wf-workflow-test-content {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(240px, 36%) minmax(0, 1fr);
+  min-height: 0;
+}
+.wf-workflow-test-settings {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+  padding: clamp(12px, 2.5cqi, 20px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-inline-end: 1px solid var(--wf-line);
+  background: var(--wf-surface);
+}
+.wf-workflow-test-settings .wf-field {
+  margin: 0;
+}
+.wf-workflow-test-settings button {
+  justify-self: start;
+}
+.wf-workflow-test-settings p[role='alert'] {
+  white-space: pre-line;
+}
+.wf-workflow-test-fixtures {
+  display: grid;
+  gap: 8px;
+}
+.wf-workflow-test-fixtures h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.wf-workflow-test-fixture {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 6px 10px 10px;
+  border: 1px solid var(--wf-line);
+  border-radius: 6px;
+  background: var(--wf-inspector);
+}
+.wf-workflow-test-fixture legend {
+  padding-inline: 4px;
+  overflow-wrap: anywhere;
+  font-weight: 650;
+}
+.wf-workflow-test-results {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.wf-workflow-test-results > :is(.wf-run-empty, .wf-run-error) {
+  padding: 10px 13px;
+}
+:where(.wf-workflow-test) .wf-run-split {
+  grid-template-columns: minmax(140px, 34%) minmax(0, 1fr);
+}
+
 @container (max-width: 560px) {
   .wf-run-split {
     grid-template-columns: minmax(0, 1fr);
@@ -807,6 +869,18 @@
   .wf-run-steps {
     border-inline-end: 0;
     border-bottom: 1px solid var(--wf-line);
+  }
+  .wf-workflow-test-content {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: auto;
+  }
+  .wf-workflow-test-settings {
+    overflow: visible;
+    border-inline-end: 0;
+    border-bottom: 1px solid var(--wf-line);
+  }
+  .wf-workflow-test-results {
+    min-height: min(380px, 60dvh);
   }
 }
 
@@ -937,4 +1011,129 @@
   overflow-wrap: anywhere;
   color: var(--wf-muted);
   font: 11px/1.4 var(--wf-code);
+}
+
+.wf-binding {
+  min-width: 0;
+  margin: 12px 0 0;
+  padding: 0;
+  border: 0;
+}
+.wf-binding legend {
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 0;
+  font-weight: 650;
+}
+.wf-binding legend > span {
+  color: var(--wf-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.wf-binding summary {
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid var(--wf-control-line);
+  border-radius: 6px;
+  background: var(--wf-control);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-branch-binding {
+  display: grid;
+  gap: 4px;
+}
+.wf-editor .wf-binding-issue {
+  color: var(--wf-danger);
+  font-size: 11px;
+}
+.wf-editor button.wf-binding-mode:not(.react-flow__controls-button) {
+  margin-top: 4px;
+  font-size: 11px;
+}
+.wf-binding-picker {
+  display: grid;
+  gap: 6px;
+  margin-top: 5px;
+  padding: 6px;
+  border: 1px solid var(--wf-line);
+  border-radius: 6px;
+  background: var(--wf-control);
+}
+.wf-binding-picker input {
+  width: 100%;
+}
+.wf-binding-picker ul {
+  display: grid;
+  gap: 2px;
+  max-height: 192px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+.wf-editor .wf-binding-picker li > button:not(.react-flow__controls-button) {
+  display: grid;
+  justify-items: start;
+  width: 100%;
+  padding: 4px 6px;
+  border-color: transparent;
+  background: transparent;
+  text-align: start;
+}
+.wf-editor .wf-binding-picker li > button:is(:hover, [aria-pressed='true']) {
+  background: var(--wf-selection);
+}
+.wf-binding-picker li > button > :is(strong, small) {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.wf-binding-picker small,
+.wf-binding-picker p {
+  color: var(--wf-muted);
+  font-size: 11px;
+}
+
+.wf-run-history {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 7px 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--wf-line);
+}
+.wf-run-history .wf-field {
+  min-width: 0;
+  margin: 0;
+}
+.wf-run-history .wf-field:first-child {
+  flex: 1 1 210px;
+}
+.wf-run-history .wf-node-actions {
+  margin: 0;
+}
+.wf-run-history p {
+  flex-basis: 100%;
+  font-size: 11px;
+}
+.wf-run-body-passes > .wf-run-inputs {
+  margin-top: 8px;
+}
+.wf-binding-manual {
+  border-top: 1px solid var(--wf-line);
+  padding-top: 4px;
+}
+.wf-binding-manual > summary {
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  font-size: 11px;
+}
+.wf-binding-manual > button {
+  width: 100%;
+  margin-top: 6px;
 }

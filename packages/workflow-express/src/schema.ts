@@ -1,3 +1,6 @@
+export const workflowWriteRequestLimit = 256 * 1024
+export const workflowBranchSourceLimit = 32
+
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject
 export interface JsonObject {
   [key: string]: JsonValue
@@ -36,10 +39,11 @@ export interface LogicCondition {
 }
 
 type ConditionsField = { key: string; label: string; type: 'conditions'; required?: boolean }
-export type NodeConfigField =
+export type NodeConfigField = (
   | (NodeField & { type: 'string' | 'number' | 'boolean' })
   | ConditionsField
   | { key: string; label: string; type: 'workflow'; required?: boolean }
+) & { alternativeInput?: string }
 
 export function isLogicConditions(value: unknown): value is LogicCondition[] {
   return (
@@ -76,13 +80,16 @@ export interface WorkflowNode {
   version: number
   config: JsonObject
   label?: string
-  bindings?: Record<string, OutputBinding>
+  bindings?: Record<string, WorkflowInputBinding>
 }
 
 export interface OutputBinding {
   nodeId: string
   field: string
+  path?: string[]
 }
+
+export type WorkflowInputBinding = OutputBinding | { branches: OutputBinding[] }
 
 export interface WorkflowEdge {
   id: string
@@ -120,8 +127,18 @@ export interface WorkflowStepResult {
   nodeId: string
   port: string | null
   output: JsonObject
+  inputs?: JsonObject
+  durationMs?: number
   httpRequest?: WorkflowHttpRequest
   releasedWait?: true
+  fixture?: true
+}
+
+export interface WorkflowTestFixture {
+  workflowId?: string
+  nodeId: string
+  port: string | null
+  output: JsonObject
 }
 
 export interface WorkflowHumanInput {
@@ -129,12 +146,43 @@ export interface WorkflowHumanInput {
   type: 'text' | 'number' | 'boolean'
 }
 
+export interface WorkflowWait {
+  id?: string
+  nodeId: string
+  bodyNodeId?: string
+  pass?: number
+  port: string
+  message: string
+  form?: WorkflowHumanInput
+  inputs?: JsonObject
+  durationMs?: number
+}
+
+export interface WorkflowLoopCheckpoint {
+  parentNodeId: string
+  workflowId: string
+  childRunId: string
+  index: number
+  durationMs?: number
+  input: JsonObject
+  steps: WorkflowStepResult[]
+}
+
+export interface WorkflowNodeFailure {
+  code: string
+  detail?: string
+  nodeId?: string
+  field?: string
+  inputs?: JsonObject
+  durationMs?: number
+}
+
 export interface WorkflowBodyRun {
   parentNodeId: string
   workflowId: string
   status: 'completed' | 'failed' | 'interrupted'
   steps: WorkflowStepResult[]
-  error?: { code: string; nodeId?: string }
+  error?: WorkflowNodeFailure
 }
 
 export interface WorkflowRun {
@@ -143,18 +191,45 @@ export interface WorkflowRun {
   revision: number
   definition: WorkflowDefinition
   input: JsonObject
+  startedAt?: string
+  finishedAt?: string
   status: 'running' | 'waiting' | 'completed' | 'failed' | 'interrupted'
-  waiting?: { nodeId: string; port: string; message: string; form?: WorkflowHumanInput }
+  waiting?: WorkflowWait
+  loopCheckpoint?: WorkflowLoopCheckpoint
   bodyWorkflows?: WorkflowDocument[]
   bodyRuns?: WorkflowBodyRun[]
   steps: WorkflowStepResult[]
-  error?: { code: string; nodeId?: string }
+  error?: WorkflowNodeFailure
+}
+
+export type WorkflowRunSummary = Pick<
+  WorkflowRun,
+  'id' | 'workflowId' | 'revision' | 'status' | 'startedAt' | 'finishedAt'
+>
+
+export interface WorkflowRunListOptions {
+  status?: WorkflowRun['status']
+  limit: number
+  offset: number
+}
+
+export const workflowRunStatuses = [
+  'running',
+  'waiting',
+  'completed',
+  'failed',
+  'interrupted'
+] as const
+
+export function summarizeWorkflowRun(run: WorkflowRun): WorkflowRunSummary {
+  const { id, workflowId, revision, status, startedAt, finishedAt } = run
+  return { id, workflowId, revision, status, startedAt, finishedAt }
 }
 
 export type WorkflowNodeTestResult = (
   | { status: 'completed'; port: string | null; output: JsonObject }
   | { status: 'waiting'; message: string }
-  | { status: 'failed'; error: string }
+  | { status: 'failed'; error: string; detail?: string }
 ) & { durationMs: number }
 
 export interface WorkflowIssue {
@@ -260,14 +335,34 @@ export function isWorkflowDefinition(value: unknown): value is WorkflowDefinitio
   )
 }
 
+function validOutputBinding(binding: unknown): binding is OutputBinding {
+  return (
+    isRecord(binding) &&
+    isId(binding.nodeId) &&
+    isId(binding.field) &&
+    (binding.path === undefined ||
+      (Array.isArray(binding.path) &&
+        binding.path.length <= 32 &&
+        binding.path.every((part) => typeof part === 'string' && part.length <= 160)))
+  )
+}
+
 function validBindings(value: unknown): boolean {
   return (
     value === undefined ||
     (isRecord(value) &&
-      Object.entries(value).every(
-        ([key, binding]) =>
-          isId(key) && isRecord(binding) && isId(binding.nodeId) && isId(binding.field)
-      ))
+      Object.entries(value).every(([key, binding]) => {
+        if (!isId(key) || !isRecord(binding)) return false
+        if (!Object.hasOwn(binding, 'branches')) return validOutputBinding(binding)
+        return (
+          !Object.hasOwn(binding, 'nodeId') &&
+          !Object.hasOwn(binding, 'field') &&
+          !Object.hasOwn(binding, 'path') &&
+          Array.isArray(binding.branches) &&
+          binding.branches.length <= workflowBranchSourceLimit &&
+          binding.branches.every(validOutputBinding)
+        )
+      }))
   )
 }
 
@@ -299,29 +394,99 @@ export function matchesField(
   return field.type === 'json' || (typeof value === field.type && (!field.required || value !== ''))
 }
 
-export function acceptsOutput(input: NodeField, output: NodeField): boolean {
+export function matchesConfigField(
+  config: JsonObject,
+  field: NodeConfigField,
+  hasInput: (key: string) => boolean
+): boolean {
+  const value = Object.hasOwn(config, field.key) ? config[field.key] : undefined
   return (
-    (input.type === 'json' || input.type === output.type) && (!input.required || !!output.required)
+    matchesField(value, field) ||
+    ((value === undefined || value === '') &&
+      !!field.alternativeInput &&
+      hasInput(field.alternativeInput))
   )
+}
+
+export function readValuePath(
+  value: JsonValue | undefined,
+  path: readonly string[]
+): JsonValue | undefined {
+  for (const part of path) {
+    if (Array.isArray(value) && /^(0|[1-9]\d*)$/.test(part)) value = value[Number(part)]
+    else if (isRecord(value) && Object.hasOwn(value, part)) value = value[part]
+    else return undefined
+  }
+  return value
+}
+
+export function readOutputBinding(
+  output: JsonObject | undefined,
+  binding: OutputBinding
+): JsonValue | undefined {
+  if (!output || !Object.hasOwn(output, binding.field)) return undefined
+  return readValuePath(output[binding.field], binding.path ?? [])
+}
+
+export function resolveInputBinding(
+  outputs: ReadonlyMap<string, JsonObject>,
+  binding: WorkflowInputBinding
+): { source?: OutputBinding; value?: JsonValue } {
+  const sources =
+    'branches' in binding ? binding.branches.filter(({ nodeId }) => outputs.has(nodeId)) : [binding]
+  if (sources.length !== 1) return {}
+  const [source] = sources
+  return { source, value: readOutputBinding(outputs.get(source.nodeId), source) }
+}
+
+export function acceptsOutput(
+  input: NodeField,
+  output: NodeField,
+  path?: readonly string[]
+): boolean {
+  const compatible = path?.length
+    ? output.type === 'json'
+    : input.type === 'json' || input.type === output.type
+  return compatible && (!input.required || !!output.required)
+}
+
+function flowLinks(definition: WorkflowDefinition, reversed = false): Map<string, Set<string>> {
+  const links = new Map<string, Set<string>>()
+  for (const { from, to } of definition.edges) {
+    const source = reversed ? to : from
+    const targets = links.get(source) ?? new Set<string>()
+    targets.add(reversed ? from : to)
+    links.set(source, targets)
+  }
+  return links
+}
+
+function reachableFrom(start: string, links: ReadonlyMap<string, Set<string>>): Set<string> {
+  const reachable = new Set<string>()
+  const pending = [start]
+  for (const id of pending) {
+    if (reachable.has(id)) continue
+    reachable.add(id)
+    for (const target of links.get(id) ?? []) if (!reachable.has(target)) pending.push(target)
+  }
+  return reachable
+}
+
+export function possibleUpstreamSources(
+  definition: WorkflowDefinition,
+  target: string
+): ReadonlySet<string> {
+  if (!definition.entry) return new Set()
+  const reachable = reachableFrom(definition.entry, flowLinks(definition))
+  const upstream = reachableFrom(target, flowLinks(definition, true))
+  return new Set([...upstream].filter((id) => id !== target && reachable.has(id)))
 }
 
 function upstreamSources(definition: WorkflowDefinition): Map<string, Set<string>> {
   const sources = new Map<string, Set<string>>()
   if (!definition.entry) return sources
-
-  const outgoing = new Map<string, Set<string>>()
-  for (const { from, to } of definition.edges) {
-    const targets = outgoing.get(from) ?? new Set<string>()
-    targets.add(to)
-    outgoing.set(from, targets)
-  }
-  const reachable = new Set<string>()
-  const pending = [definition.entry]
-  for (const id of pending) {
-    if (reachable.has(id)) continue
-    reachable.add(id)
-    for (const target of outgoing.get(id) ?? []) if (!reachable.has(target)) pending.push(target)
-  }
+  const outgoing = flowLinks(definition)
+  const reachable = reachableFrom(definition.entry, outgoing)
 
   const counts = new Map<string, number>()
   for (const id of reachable) {
@@ -349,6 +514,30 @@ function upstreamSources(definition: WorkflowDefinition): Map<string, Set<string
   const visited = new Set(queue)
   for (const id of sources.keys()) if (!visited.has(id)) sources.delete(id)
   return sources
+}
+
+function coversExclusivePaths(
+  definition: WorkflowDefinition,
+  target: string,
+  choices: ReadonlySet<string>
+): boolean {
+  if (!definition.entry) return false
+  const outgoing = flowLinks(definition)
+  const pending = [{ id: definition.entry, count: 0 }]
+  const visited = [new Set<string>(), new Set<string>(), new Set<string>()]
+  let reached = false
+  for (const { id, count } of pending) {
+    if (visited[count].has(id)) continue
+    visited[count].add(id)
+    if (id === target) {
+      if (count !== 1) return false
+      reached = true
+      continue
+    }
+    const nextCount = choices.has(id) ? Math.min(2, count + 1) : count
+    for (const next of outgoing.get(id) ?? []) pending.push({ id: next, count: nextCount })
+  }
+  return reached
 }
 
 export function availableSources(
@@ -400,6 +589,16 @@ export function validateWorkflow(
   const seenEdges = new Set<string>()
   const upstream = upstreamSources(definition)
 
+  function compatibleBinding(field: NodeField, binding: OutputBinding): boolean {
+    const source = nodes.get(binding.nodeId)
+    const output =
+      source &&
+      descriptors
+        .get(nodeKey(source.type, source.version))
+        ?.outputs?.find((item) => item.key === binding.field)
+    return !!output && acceptsOutput(field, output, binding.path)
+  }
+
   if (nodes.size !== definition.nodes.length) issues.push({ code: 'duplicate_node' })
   if (!definition.entry || !nodes.has(definition.entry)) issues.push({ code: 'missing_entry' })
 
@@ -429,8 +628,9 @@ export function validateWorkflow(
       continue
     }
     for (const field of descriptor.fields ?? []) {
-      const value = Object.hasOwn(node.config, field.key) ? node.config[field.key] : undefined
-      if (!matchesField(value, field)) {
+      if (
+        !matchesConfigField(node.config, field, (key) => Object.hasOwn(node.bindings ?? {}, key))
+      ) {
         issues.push({ code: 'invalid_config', nodeId: node.id, field: field.key })
       }
     }
@@ -444,13 +644,24 @@ export function validateWorkflow(
           issues.push({ code: 'missing_input', nodeId: node.id, field: field.key })
         continue
       }
-      const source = nodes.get(binding.nodeId)
-      const output =
-        source &&
-        descriptors
-          .get(nodeKey(source.type, source.version))
-          ?.outputs?.find((item) => item.key === binding.field)
-      if (!sources?.has(binding.nodeId) || !output || !acceptsOutput(field, output)) {
+      if ('branches' in binding) {
+        const possible = possibleUpstreamSources(definition, node.id)
+        const choices = new Set(binding.branches.map(({ nodeId }) => nodeId))
+        const required = { ...field, required: true }
+        if (
+          choices.size < 2 ||
+          binding.branches.length > workflowBranchSourceLimit ||
+          choices.size !== binding.branches.length ||
+          binding.branches.some(
+            (source) => !possible.has(source.nodeId) || !compatibleBinding(required, source)
+          ) ||
+          !coversExclusivePaths(definition, node.id, choices)
+        ) {
+          issues.push({ code: 'invalid_branch_binding', nodeId: node.id, field: field.key })
+        }
+        continue
+      }
+      if (!sources?.has(binding.nodeId) || !compatibleBinding(field, binding)) {
         issues.push({ code: 'invalid_binding', nodeId: node.id, field: field.key })
       }
     }
@@ -482,12 +693,16 @@ export function validateWorkflow(
 
 export function canUseAsBody(
   definition: WorkflowDefinition,
-  catalog: readonly NodeDescriptor[]
+  catalog: readonly NodeDescriptor[],
+  allowWaits = false
 ): boolean {
   if (validateWorkflow(definition, catalog).length) return false
   const descriptors = new Map(catalog.map((node) => [nodeKey(node.type, node.version), node]))
   return !definition.nodes.some((node) => {
     const descriptor = descriptors.get(nodeKey(node.type, node.version))
-    return descriptor?.pausesRun || descriptor?.fields?.some(({ type }) => type === 'workflow')
+    return (
+      (!allowWaits && descriptor?.pausesRun) ||
+      descriptor?.fields?.some(({ type }) => type === 'workflow')
+    )
   })
 }

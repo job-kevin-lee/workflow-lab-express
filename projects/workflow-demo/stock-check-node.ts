@@ -1,6 +1,7 @@
 import { isRecord, type WorkflowNodeRegistration } from '@ideawithai/workflow-express'
 
 export const stockCheckNode: WorkflowNodeRegistration = {
+  testSafe: true,
   descriptor: {
     type: 'lab:stock-check',
     version: 1,

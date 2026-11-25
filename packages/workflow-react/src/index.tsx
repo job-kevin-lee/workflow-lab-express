@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useMemo,
@@ -18,10 +19,10 @@ import {
   type Edge,
   type Node,
   type NodeChange,
-  type NodeProps
+  type NodeProps,
+  type ReactFlowInstance
 } from '@xyflow/react'
 import {
-  acceptsOutput,
   availableSources,
   canConnect,
   canUseAsBody,
@@ -31,7 +32,9 @@ import {
   isLogicConditions,
   logicOperators,
   nodeKey,
+  possibleUpstreamSources,
   validateWorkflow,
+  workflowRunStatuses,
   type JsonObject,
   type JsonValue,
   type LogicCondition,
@@ -45,8 +48,19 @@ import {
   type WorkflowIssue,
   type WorkflowNodeTestResult,
   type WorkflowNode,
-  type WorkflowRun
+  type WorkflowRun,
+  type WorkflowRunSummary,
+  type WorkflowStepResult,
+  type WorkflowTestFixture
 } from '@ideawithai/workflow-express/schema'
+import {
+  InputBindingPicker,
+  boundSample,
+  branchBindingIssueText,
+  observedOutputs
+} from './binding-picker.js'
+import { arrangeLayout, insertionPoint, nodePosition } from './graph-layout.js'
+import { WorkflowTestDialog } from './workflow-test-dialog.js'
 
 export type {
   JsonObject,
@@ -61,6 +75,7 @@ export interface WorkflowEditorProps {
   request?: typeof fetch
   runInput?: JsonObject
   runDisabled?: boolean
+  enableWorkflowTests?: boolean
   documentTarget?: HTMLElement | null
   paletteTypes?: readonly string[]
   onLoaded?: (document: WorkflowDocument) => void
@@ -152,7 +167,13 @@ class RequestError extends Error {
   constructor(
     public status: number,
     public code: string,
-    public fields?: { kind: 'input' | 'config'; field: string; label: string }[]
+    public fields?: { kind: 'input' | 'config'; field: string; label: string }[],
+    public body?: {
+      detail?: string
+      nodeId?: string
+      workflowId?: string
+      issues?: WorkflowIssue[]
+    }
   ) {
     super(code)
   }
@@ -162,7 +183,7 @@ async function requestJson<T>(request: typeof fetch, url: string, init?: Request
   const response = await request(url, init)
   const data = await response.json()
   if (!response.ok)
-    throw new RequestError(response.status, data.error ?? 'request_failed', data.fields)
+    throw new RequestError(response.status, data.error ?? 'request_failed', data.fields, data)
   return data
 }
 
@@ -330,7 +351,8 @@ function WorkflowBodyField({
   base,
   workflowId,
   request,
-  catalog
+  catalog,
+  allowWaits
 }: {
   label: string
   value: JsonValue | undefined
@@ -339,6 +361,7 @@ function WorkflowBodyField({
   workflowId: string
   request: typeof fetch
   catalog: readonly NodeDescriptor[]
+  allowWaits: boolean
 }): ReactNode {
   const [options, setOptions] = useState<WorkflowDocument[]>()
   const [error, setError] = useState('')
@@ -349,7 +372,8 @@ function WorkflowBodyField({
         if (!controller.signal.aborted) {
           setOptions(
             documents.filter(
-              ({ id, definition }) => id !== workflowId && canUseAsBody(definition, catalog)
+              ({ id, definition }) =>
+                id !== workflowId && canUseAsBody(definition, catalog, allowWaits)
             )
           )
         }
@@ -358,7 +382,7 @@ function WorkflowBodyField({
         if (!controller.signal.aborted) setError('Could not load saved workflows.')
       })
     return () => controller.abort()
-  }, [base, workflowId, request, catalog])
+  }, [base, workflowId, request, catalog, allowWaits])
 
   const current = typeof value === 'string' ? value : ''
   return (
@@ -401,7 +425,7 @@ function NodeConfigurationField({
   setConfig: (config: JsonObject) => void
   bodyPicker: Pick<
     Parameters<typeof WorkflowBodyField>[0],
-    'base' | 'workflowId' | 'request' | 'catalog'
+    'base' | 'workflowId' | 'request' | 'catalog' | 'allowWaits'
   >
 }): ReactNode {
   const value = Object.hasOwn(node.config, field.key) ? node.config[field.key] : undefined
@@ -482,13 +506,15 @@ function NodeTest({
   descriptor,
   base,
   request,
-  input
+  input,
+  sample
 }: {
   node: WorkflowNode
   descriptor: NodeDescriptor
   base: string
   request: typeof fetch
   input?: JsonObject
+  sample: JsonObject
 }): ReactNode {
   const inputFields = descriptor.inputs ?? []
   const [exampleText] = useState(() =>
@@ -509,6 +535,19 @@ function NodeTest({
     config: JsonObject
     inputs: string
   }>()
+  const sampleCount = Object.keys(sample).length
+  const bindings = Object.keys(node.bindings ?? {}).length
+  function useRunValues(): void {
+    let existing: JsonObject = JSON.parse(exampleText)
+    try {
+      const value: unknown = JSON.parse(inputsText)
+      if (isJsonObject(value)) existing = value
+    } catch {
+      existing = JSON.parse(exampleText)
+    }
+    setInputsText(JSON.stringify({ ...existing, ...sample }, null, 2))
+    setError('')
+  }
   async function runTest(): Promise<void> {
     setError('')
     setTest(undefined)
@@ -587,6 +626,18 @@ function NodeTest({
         <button type="button" disabled={running} onClick={runTest}>
           {running ? 'Testing…' : 'Test Node'}
         </button>
+        {!!bindings && (
+          <button
+            type="button"
+            disabled={running || !sampleCount}
+            title={
+              !sampleCount ? 'Run the workflow to capture values for these bindings.' : undefined
+            }
+            onClick={useRunValues}
+          >
+            Use last run values
+          </button>
+        )}
         {exampleText !== '{}' && (
           <button
             type="button"
@@ -632,7 +683,9 @@ function NodeTest({
           {test && (test.config !== node.config || test.inputs !== inputsText) && (
             <p>Settings changed since this test.</p>
           )}
-          {result.status === 'failed' && <p>{result.error.replaceAll('_', ' ')}</p>}
+          {result.status === 'failed' && (
+            <p>{result.detail ?? result.error.replaceAll('_', ' ')}</p>
+          )}
           {result.status === 'waiting' && (
             <p>{result.message} Callback URLs are created during full workflow runs.</p>
           )}
@@ -664,6 +717,184 @@ const runStatusLabels = {
   failed: 'Failed',
   interrupted: 'Interrupted'
 } satisfies Record<WorkflowRun['status'], string>
+
+function runHistoryPath(workflowUrl: string, limit: number, offset = 0, status = ''): string {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  if (status) params.set('status', status)
+  return `${workflowUrl}/runs?${params}`
+}
+
+function runDetailsPath(base: string, runId: string): string {
+  return `${base}/runs/${encodeURIComponent(runId)}`
+}
+
+async function requestRun(
+  request: typeof fetch,
+  url: string,
+  id: string,
+  init?: RequestInit
+): Promise<WorkflowRun> {
+  const run = await requestJson<WorkflowRun>(request, url, init)
+  if (run?.id !== id || !workflowRunStatuses.includes(run.status)) {
+    throw new Error('Invalid workflow run response.')
+  }
+  return run
+}
+
+async function lookupRun(
+  request: typeof fetch,
+  url: string,
+  id: string,
+  init?: RequestInit
+): Promise<WorkflowRun | null> {
+  try {
+    return await requestRun(request, url, id, init)
+  } catch (error) {
+    if (error instanceof RequestError && error.status === 404 && error.code === 'run_not_found') {
+      return null
+    }
+    throw error
+  }
+}
+
+function rejectedRunStart(error: unknown): boolean {
+  return (
+    error instanceof RequestError &&
+    ((error.status === 400 && ['invalid_run', 'invalid_json'].includes(error.code)) ||
+      (error.status === 404 && error.code === 'workflow_not_found') ||
+      (error.status === 409 && error.code === 'revision_conflict') ||
+      (error.status === 413 && error.code === 'body_too_large') ||
+      (error.status === 422 && error.code === 'invalid_workflow') ||
+      (error.status === 503 && error.code === 'workflow_unavailable'))
+  )
+}
+
+function runSummaryLabel(summary: WorkflowRunSummary): string {
+  const started = summary.startedAt && new Date(summary.startedAt)
+  const date = started && Number.isFinite(started.getTime()) ? started.toLocaleString() : ''
+  const status = summary.status === 'waiting' ? 'Waiting' : runStatusLabels[summary.status]
+  return [status, date, `r${summary.revision} · ${summary.id.slice(0, 8)}`]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function RunHistoryControls({
+  workflowUrl,
+  request,
+  currentId,
+  currentStatus,
+  selectedId,
+  onSelect
+}: {
+  workflowUrl: string
+  request: typeof fetch
+  currentId?: string
+  currentStatus?: WorkflowRun['status']
+  selectedId: string
+  onSelect: (id: string) => void
+}): ReactNode {
+  const [filter, setFilter] = useState('')
+  const [offset, setOffset] = useState(0)
+  const [runs, setRuns] = useState<WorkflowRunSummary[]>([])
+  const [retained, setRetained] = useState<WorkflowRunSummary>()
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const pageSize = 20
+  useEffect(() => {
+    const controller = new AbortController()
+    setLoading(true)
+    setError('')
+    requestJson<WorkflowRunSummary[]>(
+      request,
+      runHistoryPath(workflowUrl, pageSize + 1, offset, filter),
+      { signal: controller.signal }
+    )
+      .then((summaries) => {
+        if (!controller.signal.aborted) setRuns(summaries)
+      })
+      .catch((failure: unknown) => {
+        if (controller.signal.aborted) return
+        setRuns([])
+        setError(
+          failure instanceof RequestError && (failure.status === 404 || failure.status === 501)
+            ? 'Run history is unavailable.'
+            : message(failure)
+        )
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+    return () => controller.abort()
+  }, [workflowUrl, request, filter, offset, currentId, currentStatus])
+
+  const page = runs.slice(0, pageSize).filter(({ id }) => id !== currentId)
+  return (
+    <section className="wf-run-history" aria-label="Run history">
+      <label className="wf-field">
+        Workflow run
+        <select
+          value={selectedId}
+          onChange={(event) => {
+            const id = event.currentTarget.value
+            setRetained(page.find((summary) => summary.id === id))
+            onSelect(id)
+          }}
+        >
+          <option value="">{currentId ? 'Current run' : 'Choose a saved run…'}</option>
+          {retained && retained.id === selectedId && !page.some(({ id }) => id === selectedId) && (
+            <option value={retained.id}>{runSummaryLabel(retained)}</option>
+          )}
+          {page.map((summary) => (
+            <option key={summary.id} value={summary.id}>
+              {runSummaryLabel(summary)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="wf-field">
+        Status
+        <select
+          value={filter}
+          onChange={(event) => {
+            setFilter(event.currentTarget.value)
+            setOffset(0)
+          }}
+        >
+          <option value="">All statuses</option>
+          <option value="running">Running</option>
+          <option value="waiting">Waiting</option>
+          <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
+          <option value="interrupted">Interrupted</option>
+        </select>
+      </label>
+      {(offset > 0 || runs.length > pageSize) && (
+        <div className="wf-node-actions" aria-label="Run history pages">
+          <button
+            type="button"
+            disabled={loading || offset === 0}
+            onClick={() => setOffset(offset - pageSize)}
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            disabled={loading || runs.length <= pageSize}
+            onClick={() => setOffset(offset + pageSize)}
+          >
+            Next
+          </button>
+        </div>
+      )}
+      {(error || loading || !page.length) && (
+        <p role="status">
+          {error ||
+            (loading ? 'Loading history…' : currentId ? 'No other runs found.' : 'No runs found.')}
+        </p>
+      )}
+    </section>
+  )
+}
 
 function waitReleasePath(runUrl: string, nodeId: string): string {
   return `${runUrl}/waits/${encodeURIComponent(nodeId)}/release`
@@ -773,6 +1004,17 @@ function HttpRequestDetails({
   )
 }
 
+function StepInputs({ inputs }: { inputs: JsonObject }): ReactNode {
+  return (
+    <section className="wf-run-inputs">
+      <h4>Inputs</h4>
+      <pre tabIndex={0} aria-label="Resolved node inputs">
+        <code>{JSON.stringify(inputs, null, 2)}</code>
+      </pre>
+    </section>
+  )
+}
+
 function StepOutput({ output, http }: { output: JsonObject; http: boolean }): ReactNode {
   return (
     <section className="wf-run-output">
@@ -784,17 +1026,23 @@ function StepOutput({ output, http }: { output: JsonObject; http: boolean }): Re
   )
 }
 
+type TraceBodyPass = Omit<WorkflowBodyRun, 'status'> & {
+  status: WorkflowRun['status']
+  waiting?: WorkflowRun['waiting']
+}
+
 function BodyRunDetails({
   passes,
   documents,
   descriptors
 }: {
-  passes: WorkflowBodyRun[]
+  passes: TraceBodyPass[]
   documents: readonly WorkflowDocument[]
   descriptors: ReadonlyMap<string, NodeDescriptor>
 }): ReactNode {
-  const [passIndex, setPassIndex] = useState(passes.length - 1)
+  const [chosenPass, setChosenPass] = useState<number>()
   const [nodeId, setNodeId] = useState<string>()
+  const passIndex = chosenPass !== undefined && passes[chosenPass] ? chosenPass : passes.length - 1
   const pass = passes[passIndex]
   const document = documents.find(({ id }) => id === pass.workflowId)
   const describe = (
@@ -804,10 +1052,18 @@ function BodyRunDetails({
     const descriptor = node && descriptors.get(nodeKey(node.type, node.version))
     return { label: node?.label || descriptor?.label || nodeId, descriptor, node }
   }
-  const step = pass.steps.find((item) => item.nodeId === nodeId) ?? pass.steps.at(-1)
+  const waitingNode = pass.waiting?.bodyNodeId
+  const selectedNode =
+    nodeId && (nodeId === waitingNode || pass.steps.some((step) => step.nodeId === nodeId))
+      ? nodeId
+      : (waitingNode ?? pass.steps.at(-1)?.nodeId)
+  const waiting = selectedNode && selectedNode === waitingNode ? pass.waiting : undefined
+  const step = waiting ? undefined : pass.steps.find((step) => step.nodeId === selectedNode)
+  const inputs = step?.inputs ?? waiting?.inputs
+  const durationMs = step?.durationMs ?? waiting?.durationMs
 
   return (
-    <details className="wf-run-body-passes">
+    <details className="wf-run-body-passes" open={pass.status === 'waiting' ? true : undefined}>
       <summary>Body passes · {passes.length}</summary>
       <div className="wf-run-pass-fields">
         <label className="wf-field">
@@ -815,7 +1071,7 @@ function BodyRunDetails({
           <select
             value={passIndex}
             onChange={(event) => {
-              setPassIndex(Number(event.target.value))
+              setChosenPass(Number(event.target.value))
               setNodeId(undefined)
             }}
           >
@@ -826,11 +1082,11 @@ function BodyRunDetails({
             ))}
           </select>
         </label>
-        {step && (
+        {selectedNode && (
           <label className="wf-field">
             Body step
-            <select value={step.nodeId} onChange={(event) => setNodeId(event.target.value)}>
-              {pass.steps.map(({ nodeId, port }) => {
+            <select value={selectedNode} onChange={(event) => setNodeId(event.target.value)}>
+              {pass.steps.map(({ nodeId, port, fixture }) => {
                 const { label, descriptor } = describe(nodeId)
                 const branch =
                   port && (descriptor?.ports.find(({ id }) => id === port)?.label || port)
@@ -838,9 +1094,16 @@ function BodyRunDetails({
                   <option key={nodeId} value={nodeId}>
                     {label}
                     {branch && ` · ${branch}`}
+                    {fixture && ' · Fixture (mocked)'}
                   </option>
                 )
               })}
+              {waitingNode && (
+                <option value={waitingNode}>
+                  {describe(waitingNode).label} ·{' '}
+                  {pass.waiting?.form ? 'Waiting for input' : 'Waiting for call'}
+                </option>
+              )}
             </select>
           </label>
         )}
@@ -848,63 +1111,42 @@ function BodyRunDetails({
       {pass.error && (
         <p className="wf-run-error">
           {pass.error.nodeId && `${describe(pass.error.nodeId).label} · `}
-          {pass.error.code.replaceAll('_', ' ')}
+          {[pass.error.detail ?? pass.error.code.replaceAll('_', ' '), pass.error.field]
+            .filter(Boolean)
+            .join(' · ')}
         </p>
       )}
+      {waiting && <p>{waiting.message}</p>}
+      {step?.fixture && <p>Fixture (mocked)</p>}
+      {durationMs !== undefined && <p>Duration · {durationMs} ms</p>}
       {step?.httpRequest && <HttpRequestDetails request={step.httpRequest} />}
+      {inputs && <StepInputs inputs={inputs} />}
       {step && (
         <StepOutput
           output={step.output}
-          http={describe(step.nodeId).node?.type === 'workflow:http'}
+          http={!step.fixture && describe(step.nodeId).node?.type === 'workflow:http'}
         />
       )}
     </details>
   )
 }
 
-function TraceLog({
-  id,
+function RunSteps({
+  run,
   runId,
   runUrl,
-  run,
-  status,
   descriptors,
-  busy,
-  loadError,
-  onRefresh,
-  onClose
+  emptyMessage = 'No steps recorded.'
 }: {
-  id: string
+  run?: WorkflowRun
   runId?: string
   runUrl?: string
-  run: WorkflowRun | undefined
-  status: WorkflowRun['status'] | undefined
   descriptors: ReadonlyMap<string, NodeDescriptor>
-  busy: boolean
-  loadError?: string
-  onRefresh: () => Promise<void>
-  onClose: () => void
+  emptyMessage?: string
 }): ReactNode {
   const [selectedNode, setSelectedNode] = useState<string>()
-  const [refreshError, setRefreshError] = useState('')
-  const dialog = useRef<HTMLDialogElement>(null)
-  const heading = useRef<HTMLHeadingElement>(null)
   const list = useRef<HTMLOListElement>(null)
   const details = useRef<HTMLElement>(null)
-  useEffect(() => {
-    const element = dialog.current
-    element?.showModal()
-    heading.current?.focus({ preventScroll: true })
-  }, [])
-
-  async function checkRun(): Promise<void> {
-    setRefreshError('')
-    try {
-      await onRefresh()
-    } catch (error) {
-      setRefreshError(message(error))
-    }
-  }
 
   function describe(nodeId: string): { title: string; type: string; nodeType?: NodeDescriptor } {
     const node = run?.definition.nodes.find(({ id }) => id === nodeId)
@@ -921,44 +1163,62 @@ function TraceLog({
     output?: JsonObject
     detail?: string
     httpRequest?: WorkflowHttpRequest
-    callback?: boolean
-  }[] = (run?.steps ?? []).map(({ nodeId, port, output, httpRequest, releasedWait }) => {
-    const { title, type, nodeType } = describe(nodeId)
-    const tone =
-      port === 'error' || output.tone === 'error'
-        ? 'error'
-        : output.tone === 'warning'
-          ? 'warning'
-          : output.tone === 'success' || (type === 'workflow:http' && port === 'ok')
-            ? 'success'
-            : undefined
-    const branch = port
-      ? (nodeType?.ports.find(({ id }) => id === port)?.label ?? port)
-      : tone === 'error'
-        ? 'Error'
-        : tone === 'warning'
-          ? 'Warning'
-          : 'Completed'
-    return {
-      nodeId,
-      title,
-      type,
-      branch,
-      tone,
-      output,
-      httpRequest,
-      callback: releasedWait || type === 'workflow:wait-for-call'
+    callback?: string
+    inputs?: WorkflowStepResult['inputs']
+    durationMs?: WorkflowStepResult['durationMs']
+    fixture?: WorkflowStepResult['fixture']
+  }[] = (run?.steps ?? []).map(
+    ({ nodeId, port, output, httpRequest, releasedWait, inputs, durationMs, fixture }) => {
+      const { title, type, nodeType } = describe(nodeId)
+      const tone =
+        port === 'error' || output.tone === 'error'
+          ? 'error'
+          : output.tone === 'warning'
+            ? 'warning'
+            : output.tone === 'success' || (type === 'workflow:http' && port === 'ok')
+              ? 'success'
+              : undefined
+      const branch = port
+        ? (nodeType?.ports.find(({ id }) => id === port)?.label ?? port)
+        : tone === 'error'
+          ? 'Error'
+          : tone === 'warning'
+            ? 'Warning'
+            : 'Completed'
+      return {
+        nodeId,
+        title,
+        type,
+        branch,
+        tone,
+        output,
+        httpRequest,
+        callback: releasedWait || type === 'workflow:wait-for-call' ? nodeId : undefined,
+        inputs,
+        durationMs,
+        fixture
+      }
     }
-  })
+  )
   if (run?.status === 'waiting' && run.waiting) {
-    const { nodeId, message: detail } = run.waiting
+    const { nodeId, message: detail, id: waitId, bodyNodeId, pass } = run.waiting
+    const { title, type } = describe(nodeId)
+    const bodyWorkflowId = run.definition.nodes.find(({ id }) => id === nodeId)?.config.workflowId
+    const body = run.bodyWorkflows?.find(({ id }) => id === bodyWorkflowId)
+    const bodyNode = body?.definition.nodes.find(({ id }) => id === bodyNodeId)
+    const bodyLabel = bodyNode
+      ? bodyNode.label || descriptors.get(nodeKey(bodyNode.type, bodyNode.version))?.label
+      : undefined
     entries.push({
       nodeId,
-      ...describe(nodeId),
+      title: bodyNodeId ? `${title} · Pass ${pass ?? '?'} · ${bodyLabel ?? bodyNodeId}` : title,
+      type,
       branch: run.waiting.form ? 'Waiting for input' : 'Waiting for call',
       tone: 'warning',
-      callback: true,
-      detail
+      callback: waitId ?? nodeId,
+      detail,
+      inputs: run.waiting.inputs,
+      durationMs: run.waiting.durationMs
     })
   }
   const runError = run?.error
@@ -968,15 +1228,24 @@ function TraceLog({
       ...describe(runError.nodeId),
       branch: run.status === 'interrupted' ? 'Interrupted' : 'Failed',
       tone: 'error',
-      detail: runError.code.replaceAll('_', ' ')
+      detail: [runError.detail ?? runError.code.replaceAll('_', ' '), runError.field]
+        .filter(Boolean)
+        .join(' · '),
+      inputs: runError.inputs,
+      durationMs: runError.durationMs
     })
   }
   const selected = entries.find(({ nodeId }) => nodeId === selectedNode) ?? entries.at(-1)
   const selectedNodeId = selected?.nodeId
   const selectedRequest =
     selected?.httpRequest ??
-    configuredHttpRequest(run?.definition.nodes.find(({ id }) => id === selectedNodeId))
-  const passes = run?.bodyRuns?.filter(({ parentNodeId }) => parentNodeId === selectedNodeId)
+    (runUrl && configuredHttpRequest(run?.definition.nodes.find(({ id }) => id === selectedNodeId)))
+  const passes: TraceBodyPass[] =
+    run?.bodyRuns?.filter(({ parentNodeId }) => parentNodeId === selectedNodeId) ?? []
+  const pending = run?.loopCheckpoint
+  if (pending && run?.status === 'waiting' && pending.parentNodeId === selectedNodeId) {
+    passes.push({ ...pending, status: 'waiting', waiting: run.waiting })
+  }
   useEffect(() => {
     if (details.current) details.current.scrollTop = 0
     const steps = list.current
@@ -987,6 +1256,156 @@ function TraceLog({
     if (top < steps.scrollTop) steps.scrollTop = top
     if (bottom > steps.scrollTop + steps.clientHeight) steps.scrollTop = bottom - steps.clientHeight
   }, [runId, selectedNodeId])
+  return (
+    <>
+      {runError && !runError.nodeId && (
+        <p className="wf-run-error" role="alert">
+          {runError.detail ?? runError.code.replaceAll('_', ' ')}
+        </p>
+      )}
+      {selected ? (
+        <div className="wf-run-split">
+          <ol className="wf-run-steps" aria-label="Workflow steps" ref={list}>
+            {entries.map(({ nodeId, title, type, branch, tone, fixture }) => (
+              <li key={nodeId}>
+                <button
+                  type="button"
+                  aria-pressed={selected.nodeId === nodeId}
+                  onClick={() => setSelectedNode(nodeId)}
+                >
+                  <NodeSymbol type={type} />
+                  <span className="wf-run-step-text">
+                    <strong>{title}</strong>
+                    <small data-tone={tone}>{branch}</small>
+                    {fixture && <small>Fixture (mocked)</small>}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ol>
+          <section className="wf-run-detail" aria-label="Step details" ref={details} tabIndex={0}>
+            <div className="wf-run-detail-heading">
+              <h3>{selected.title}</h3>
+              <span data-tone={selected.tone}>{selected.branch}</span>
+              {selected.fixture && <span>Fixture (mocked)</span>}
+              {selected.durationMs !== undefined && <span>{selected.durationMs} ms</span>}
+            </div>
+            {selected.detail && <p>{selected.detail}</p>}
+            {selected.callback && runUrl && (
+              <CallbackUrl path={waitReleasePath(runUrl, selected.callback)} />
+            )}
+            {selectedRequest && (
+              <HttpRequestDetails request={selectedRequest} configured={!selected.httpRequest} />
+            )}
+            {!!passes.length && (
+              <BodyRunDetails
+                key={`${runId}:${selected.nodeId}`}
+                passes={passes}
+                documents={run?.bodyWorkflows ?? []}
+                descriptors={descriptors}
+              />
+            )}
+            {selected.inputs && <StepInputs inputs={selected.inputs} />}
+            {selected.output && (
+              <StepOutput
+                output={selected.output}
+                http={!selected.fixture && selected.type === 'workflow:http'}
+              />
+            )}
+          </section>
+        </div>
+      ) : (
+        <p className="wf-run-empty">{emptyMessage}</p>
+      )}
+    </>
+  )
+}
+
+function TraceLog({
+  id,
+  runId: currentId,
+  run: currentRun,
+  status: currentStatus,
+  workflowUrl,
+  base,
+  request,
+  descriptors,
+  busy,
+  runInProgress,
+  loadError,
+  onRefresh,
+  onOpenWaitingRun,
+  onClose
+}: {
+  id: string
+  runId?: string
+  run: WorkflowRun | undefined
+  status: WorkflowRun['status'] | undefined
+  workflowUrl: string
+  base: string
+  request: typeof fetch
+  descriptors: ReadonlyMap<string, NodeDescriptor>
+  busy: boolean
+  runInProgress: boolean
+  loadError?: string
+  onRefresh: () => Promise<void>
+  onOpenWaitingRun: (run: WorkflowRun) => void
+  onClose: () => void
+}): ReactNode {
+  const [refreshError, setRefreshError] = useState('')
+  const [pastId, setPastId] = useState('')
+  const [pastRun, setPastRun] = useState<WorkflowRun>()
+  const [loadingPast, setLoadingPast] = useState(false)
+  const [reloadPast, setReloadPast] = useState(0)
+  const run = pastId ? pastRun : currentRun
+  const runId = pastId || currentId
+  const runUrl = runId ? runDetailsPath(base, runId) : undefined
+  const status = pastId ? pastRun?.status : currentStatus
+  const dialog = useRef<HTMLDialogElement>(null)
+  const heading = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    const element = dialog.current
+    element?.showModal()
+    heading.current?.focus({ preventScroll: true })
+  }, [])
+
+  useEffect(() => {
+    if (!pastId) return
+    const controller = new AbortController()
+    setLoadingPast(true)
+    requestJson<WorkflowRun>(request, runDetailsPath(base, pastId), { signal: controller.signal })
+      .then((savedRun) => {
+        if (!controller.signal.aborted) setPastRun(savedRun)
+      })
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted) setRefreshError(message(failure))
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingPast(false)
+      })
+    return () => controller.abort()
+  }, [base, request, pastId, reloadPast])
+
+  function selectRun(id: string): void {
+    setPastId(id)
+    setPastRun(undefined)
+    setLoadingPast(!!id)
+    setRefreshError('')
+  }
+
+  async function checkRun(): Promise<void> {
+    setRefreshError('')
+    if (pastId) {
+      setReloadPast(reloadPast + 1)
+      return
+    }
+    try {
+      await onRefresh()
+    } catch (error) {
+      setRefreshError(message(error))
+    }
+  }
+
   const count = run?.steps.length ?? 0
   const statusLabel =
     status === 'waiting' && run?.waiting?.form
@@ -1020,8 +1439,20 @@ function TraceLog({
         )}
         <div className="wf-run-actions">
           {runId && (!run || run.status === 'running' || run.status === 'waiting') && (
-            <button type="button" disabled={busy} onClick={checkRun}>
+            <button type="button" disabled={pastId ? loadingPast : busy} onClick={checkRun}>
               Check run
+            </button>
+          )}
+          {pastRun?.status === 'waiting' && !runInProgress && (
+            <button
+              type="button"
+              disabled={busy || loadingPast}
+              onClick={() => {
+                onOpenWaitingRun(pastRun)
+                dialog.current?.close()
+              }}
+            >
+              Open waiting run
             </button>
           )}
           <button type="button" onClick={() => dialog.current?.close()}>
@@ -1029,69 +1460,35 @@ function TraceLog({
           </button>
         </div>
       </header>
-      {(refreshError || loadError) && (
+      <RunHistoryControls
+        workflowUrl={workflowUrl}
+        request={request}
+        currentId={currentId}
+        currentStatus={currentStatus}
+        selectedId={pastId}
+        onSelect={selectRun}
+      />
+      {(refreshError || (!pastId && loadError)) && (
         <p className="wf-run-error" role="alert">
           {refreshError || loadError}
         </p>
       )}
-      {runError && !runError.nodeId && (
-        <p className="wf-run-error" role="alert">
-          {runError.code.replaceAll('_', ' ')}
-        </p>
-      )}
-      {selected ? (
-        <div className="wf-run-split">
-          <ol className="wf-run-steps" aria-label="Workflow steps" ref={list}>
-            {entries.map(({ nodeId, title, type, branch, tone }) => (
-              <li key={nodeId}>
-                <button
-                  type="button"
-                  aria-pressed={selected.nodeId === nodeId}
-                  onClick={() => setSelectedNode(nodeId)}
-                >
-                  <NodeSymbol type={type} />
-                  <span className="wf-run-step-text">
-                    <strong>{title}</strong>
-                    <small data-tone={tone}>{branch}</small>
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ol>
-          <section className="wf-run-detail" aria-label="Step details" ref={details} tabIndex={0}>
-            <div className="wf-run-detail-heading">
-              <h3>{selected.title}</h3>
-              <span data-tone={selected.tone}>{selected.branch}</span>
-            </div>
-            {selected.detail && <p>{selected.detail}</p>}
-            {selected.callback && runUrl && (
-              <CallbackUrl path={waitReleasePath(runUrl, selected.nodeId)} />
-            )}
-            {selectedRequest && (
-              <HttpRequestDetails request={selectedRequest} configured={!selected.httpRequest} />
-            )}
-            {!!passes?.length && (
-              <BodyRunDetails
-                key={`${runId}:${selected.nodeId}`}
-                passes={passes}
-                documents={run?.bodyWorkflows ?? []}
-                descriptors={descriptors}
-              />
-            )}
-            {selected.output && (
-              <StepOutput output={selected.output} http={selected.type === 'workflow:http'} />
-            )}
-          </section>
-        </div>
-      ) : (
-        <p className="wf-run-empty">
-          {!runId
-            ? 'Run this workflow to see its steps.'
-            : status === 'running'
-              ? 'Waiting for the first step to finish…'
-              : 'No steps recorded.'}
-        </p>
-      )}
+      <RunSteps
+        key={pastId}
+        run={run}
+        runId={runId}
+        runUrl={runUrl}
+        descriptors={descriptors}
+        emptyMessage={
+          loadingPast
+            ? 'Loading run…'
+            : !runId
+              ? 'Run this workflow to see its steps.'
+              : status === 'running'
+                ? 'Waiting for the first step to finish…'
+                : undefined
+        }
+      />
       {runId && (
         <footer className="wf-run-footer">
           Run ID <code>{runId}</code>
@@ -1109,6 +1506,7 @@ function Editor({
   request = fetch,
   runInput,
   runDisabled,
+  enableWorkflowTests,
   documentTarget,
   paletteTypes,
   onSaved,
@@ -1130,23 +1528,40 @@ function Editor({
   const [selection, setSelection] = useState<{ node?: string; edge?: string }>({})
   const [moving, setMoving] = useState<WorkflowDefinition['layout']>({})
   const [measurements, setMeasurements] = useState(new Map<string, Card['measured']>())
-  const [operation, setOperation] = useState<'save' | 'run' | 'release' | null>(null)
+  const [operation, setOperation] = useState<'save' | 'run' | 'check' | 'release' | null>(null)
   const [error, setError] = useState('')
-  const [run, setRun] = useState<WorkflowRun>()
+  const [runLookupError, setRunLookupError] = useState('')
+  const [lastSavedRun, setLastSavedRun] = useState<WorkflowRun>()
+  const canvas = useRef<ReactFlowInstance<Card, Edge>>(null)
   const [traceLogOpen, setTraceLogOpen] = useState(false)
   const traceLogId = useId()
   const traceLogButton = useRef<HTMLButtonElement>(null)
-  const runStorageKey = `workflow-run:${url}`
-  const [runId, setRunId] = useState(
-    () => window.sessionStorage.getItem(runStorageKey) ?? undefined
+  const [workflowTestOpen, setWorkflowTestOpen] = useState(false)
+  const workflowTestId = useId()
+  const workflowTestButton = useRef<HTMLButtonElement>(null)
+  const loadTestBody = useCallback(
+    (id: string, signal: AbortSignal) =>
+      requestJson<WorkflowDocument>(request, `${base}/workflows/${encodeURIComponent(id)}`, {
+        signal
+      }),
+    [base, request]
   )
-  const [releasePayload, setReleasePayload] = useState('{}')
-  const runUrl = runId ? `${base}/runs/${encodeURIComponent(runId)}` : undefined
+  const runStorageKey = `workflow-run:${url}`
+  const [trackedRun, setTrackedRun] = useState<
+    { id: string; run?: WorkflowRun | null } | undefined
+  >(() => {
+    const id = window.sessionStorage.getItem(runStorageKey)
+    return id ? { id } : undefined
+  })
+  const [releaseDraft, setReleaseDraft] = useState<{ waitId?: string; text: string }>()
+  const run = trackedRun?.run ?? undefined
+  const runId = trackedRun?.run === null ? undefined : trackedRun?.id
+  const runUrl = runId ? runDetailsPath(base, runId) : undefined
+  const waitId = run?.waiting && (run.waiting.id ?? run.waiting.nodeId)
+  const releasePayload = releaseDraft?.waitId === waitId ? (releaseDraft?.text ?? '{}') : '{}'
   const releaseUrl =
-    runUrl && run?.status === 'waiting' && run.waiting
-      ? waitReleasePath(runUrl, run.waiting.nodeId)
-      : undefined
-  const activeRun = run?.status === 'running' || run?.status === 'waiting'
+    runUrl && run?.status === 'waiting' && waitId ? waitReleasePath(runUrl, waitId) : undefined
+  const runInProgress = !!runId && (!run || run.status === 'running' || run.status === 'waiting')
   const definition = history.current
   const dirty = saved.definition !== definition
   const descriptors = useMemo(
@@ -1171,30 +1586,73 @@ function Editor({
     () => (selection.node ? availableSources(definition, selection.node) : new Set<string>()),
     [definition, selection.node]
   )
+  const possibleSources = useMemo(
+    () =>
+      selection.node ? possibleUpstreamSources(definition, selection.node) : new Set<string>(),
+    [definition, selection.node]
+  )
+  const selectedEdge = definition.edges.find(({ id }) => id === selection.edge)
+  const latest =
+    run &&
+    (!lastSavedRun ||
+      run.id === lastSavedRun.id ||
+      (run.startedAt && run.startedAt >= (lastSavedRun.startedAt ?? '')))
+      ? run
+      : lastSavedRun
+  const outputs = useMemo(() => observedOutputs(definition, latest), [definition, latest])
+  const inspectedInputNode = descriptor?.inputs?.length ? selected?.id : undefined
+
+  useEffect(() => {
+    if (!saved.revision) return
+    const controller = new AbortController()
+    const init = { signal: controller.signal }
+    let version = 0
+    function refresh(): void {
+      const requestVersion = ++version
+      requestJson<WorkflowRunSummary[]>(request, runHistoryPath(url, 1), init)
+        .then(
+          async ([recent]) =>
+            recent &&
+            (await requestJson<WorkflowRun>(request, runDetailsPath(base, recent.id), init))
+        )
+        .then((sample) => {
+          if (!controller.signal.aborted && version === requestVersion)
+            setLastSavedRun(sample || undefined)
+        })
+        .catch(() => {
+          if (!controller.signal.aborted && version === requestVersion) setLastSavedRun(undefined)
+        })
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => {
+      controller.abort()
+      window.removeEventListener('focus', refresh)
+    }
+  }, [base, url, request, saved.revision, inspectedInputNode])
 
   useEffect(() => {
     onDirtyChange?.(dirty)
   }, [dirty, onDirtyChange])
 
   useEffect(() => {
-    if (!runUrl || operation === 'run' || operation === 'release' || (run && !activeRun)) return
+    if (!runId || !runUrl || !runInProgress || (operation && operation !== 'save')) return
     const controller = new AbortController()
     let polling: ReturnType<typeof setTimeout> | undefined
+    const id = runId
+    const path = runUrl
 
     async function poll(): Promise<void> {
-      if (!runUrl) return
       try {
-        const latest = await requestJson<WorkflowRun>(request, runUrl, {
-          signal: controller.signal
-        })
-        if (!controller.signal.aborted) setRun(latest)
+        const latest = await lookupRun(request, path, id, { signal: controller.signal })
+        if (controller.signal.aborted) return
+        setTrackedRun({ id, run: latest })
+        setRunLookupError((previous) =>
+          !latest && previous ? 'Run was not found. Try again.' : ''
+        )
       } catch (error) {
         if (controller.signal.aborted) return
-        if (error instanceof RequestError && error.status === 404) {
-          window.sessionStorage.removeItem(runStorageKey)
-          setRunId(undefined)
-          return
-        }
+        if (!run) setRunLookupError(message(error))
         polling = setTimeout(poll, 1000)
       }
     }
@@ -1205,7 +1663,7 @@ function Editor({
       clearTimeout(polling)
       controller.abort()
     }
-  }, [activeRun, operation, request, run, runStorageKey, runUrl])
+  }, [runInProgress, operation, request, run, runId, runUrl])
 
   function edit(update: (value: WorkflowDefinition) => WorkflowDefinition): void {
     setHistory(({ past, current, future }) => {
@@ -1249,9 +1707,7 @@ function Editor({
       const updated = settled.filter(({ id, position }) => {
         const index = value.nodes.findIndex((node) => node.id === id)
         if (index < 0) return false
-        const previous = Object.hasOwn(value.layout, id)
-          ? value.layout[id]
-          : { x: index * 200, y: 0 }
+        const previous = nodePosition(value.layout, id, index)
         return previous.x !== position.x || previous.y !== position.y
       })
       if (!updated.length) return value
@@ -1312,6 +1768,48 @@ function Editor({
     setSelection({ node: id })
   }
 
+  function autoArrange(): void {
+    edit((value) => {
+      const layout = arrangeLayout(value, measurements)
+      return value.nodes.every(
+        ({ id }) =>
+          Object.hasOwn(value.layout, id) &&
+          value.layout[id].x === layout[id].x &&
+          value.layout[id].y === layout[id].y
+      )
+        ? value
+        : { ...value, layout }
+    })
+    requestAnimationFrame(() => void canvas.current?.fitView())
+  }
+
+  function insertNode(edgeId: string, item: NodeDescriptor): void {
+    if (item.ports.length !== 1 || definition.nodes.length >= 100 || definition.edges.length >= 400)
+      return
+    const id = createId()
+    const outgoingId = createId()
+    const port = item.ports[0].id
+    edit((value) => {
+      const edge = value.edges.find((wire) => wire.id === edgeId)
+      if (!edge || value.nodes.length >= 100 || value.edges.length >= 400) return value
+      const node = { id, type: item.type, version: item.version, config: {} }
+      const next = {
+        ...value,
+        nodes: [...value.nodes, node],
+        edges: value.edges.filter((wire) => wire.id !== edgeId),
+        layout: { ...value.layout, [id]: insertionPoint(value, edge, measurements) }
+      }
+      const incoming = { ...edge, to: id }
+      const outgoing = { id: outgoingId, from: id, port, to: edge.to }
+      if (!canConnect(next, catalog, incoming)) return value
+      next.edges.push(incoming)
+      if (!canConnect(next, catalog, outgoing)) return value
+      next.edges.push(outgoing)
+      return next
+    })
+    setSelection({ node: id })
+  }
+
   function updateNode(id: string, update: Partial<WorkflowNode>): void {
     edit((value) => ({
       ...value,
@@ -1354,37 +1852,102 @@ function Editor({
   }
 
   async function execute(): Promise<void> {
-    const id = createId()
-    setRunId(id)
+    if (runInProgress || operation) return
+    const id = trackedRun?.run === null ? trackedRun.id : createId()
     window.sessionStorage.setItem(runStorageKey, id)
-    setReleasePayload('{}')
-    setRun(undefined)
+    setTrackedRun({ id })
+    setReleaseDraft(undefined)
     setOperation('run')
     setError('')
+    setRunLookupError('')
     try {
-      setRun(
-        await requestJson<WorkflowRun>(
-          request,
-          `${url}/runs`,
-          send('POST', { revision: saved.revision, runId: id, input: runInput ?? {} })
-        )
+      const result = await requestRun(
+        request,
+        `${url}/runs`,
+        id,
+        send('POST', { revision: saved.revision, runId: id, input: runInput ?? {} })
       )
+      setTrackedRun({ id, run: result })
     } catch (error) {
-      setError(message(error))
+      if (rejectedRunStart(error)) {
+        setTrackedRun({ id, run: null })
+        setError(message(error))
+      } else {
+        setRunLookupError(message(error))
+      }
     } finally {
       setOperation(null)
     }
   }
 
   async function refreshRun(): Promise<void> {
-    if (!runUrl) return
-    setOperation('run')
+    if (!runId || !runUrl || operation) return
+    setOperation('check')
     setError('')
     try {
-      setRun(await requestJson<WorkflowRun>(request, runUrl))
+      const latest = await lookupRun(request, runUrl, runId)
+      setTrackedRun({ id: runId, run: latest })
+      setRunLookupError(latest ? '' : 'Run was not found. Try again.')
     } finally {
       setOperation(null)
     }
+  }
+
+  function issueText(issue: WorkflowIssue): string {
+    return (
+      formatIssue?.(issue) ??
+      (issue.code === 'invalid_branch_binding'
+        ? `${issue.field ? `${issue.field} · ` : ''}${branchBindingIssueText}`
+        : `${issue.code.replaceAll('_', ' ')}${issue.field ? ` · ${issue.field}` : ''}`)
+    )
+  }
+
+  async function testWorkflow(
+    input: JsonObject,
+    fixtures: WorkflowTestFixture[],
+    signal: AbortSignal
+  ): Promise<WorkflowRun> {
+    const result = await requestJson<WorkflowRun>(request, `${url}/test`, {
+      ...send('POST', { definition, input, fixtures }),
+      signal
+    }).catch((failure: unknown) => {
+      if (failure instanceof RequestError) {
+        if (failure.code === 'invalid_workflow' && failure.body?.issues?.length) {
+          throw new Error(failure.body.issues.map(issueText).join('\n'))
+        }
+        if (failure.code === 'invalid_workflow_fixture' && failure.body?.detail) {
+          const { nodeId, workflowId, detail } = failure.body
+          const node =
+            workflowId === document.id
+              ? definition.nodes.find(({ id }) => id === nodeId)
+              : undefined
+          const descriptor = node && descriptors.get(nodeKey(node.type, node.version))
+          const label = node?.label || descriptor?.label || nodeId
+          const scope = workflowId !== document.id ? workflowId : undefined
+          throw new Error([scope, label, detail].filter(Boolean).join(' · '))
+        }
+      }
+      throw new Error(message(failure))
+    })
+    if (
+      result?.revision !== 0 ||
+      result.workflowId !== document.id ||
+      !workflowRunStatuses.includes(result.status) ||
+      !Array.isArray(result.definition?.nodes) ||
+      !Array.isArray(result.steps)
+    ) {
+      throw new Error('The workflow service returned an invalid test result.')
+    }
+    return result
+  }
+
+  function openWaitingRun(run: WorkflowRun): void {
+    if (runInProgress || operation || run.status !== 'waiting') return
+    window.sessionStorage.setItem(runStorageKey, run.id)
+    setTrackedRun({ id: run.id, run })
+    setReleaseDraft(undefined)
+    setError('')
+    setRunLookupError('')
   }
 
   function sendCallback(): void {
@@ -1398,12 +1961,13 @@ function Editor({
   }
 
   async function release(body: JsonObject): Promise<void> {
-    if (!releaseUrl) return
+    if (!runId || !releaseUrl || operation) return
     setOperation('release')
     setError('')
     try {
-      setRun(await requestJson<WorkflowRun>(request, releaseUrl, send('POST', body)))
-      setReleasePayload('{}')
+      const result = await requestRun(request, releaseUrl, runId, send('POST', body))
+      setTrackedRun({ id: runId, run: result })
+      setReleaseDraft(undefined)
     } catch (error) {
       setError(message(error))
     } finally {
@@ -1441,7 +2005,7 @@ function Editor({
       ? 'Waiting for input'
       : runStatus
         ? runStatusLabels[runStatus]
-        : 'Loading run…')
+        : 'Checking run…')
   const statusMessage =
     runStatus === 'waiting'
       ? run?.waiting?.message
@@ -1454,6 +2018,11 @@ function Editor({
     traceLogButton.current?.focus()
   }
 
+  function closeWorkflowTest(): void {
+    setWorkflowTestOpen(false)
+    workflowTestButton.current?.focus()
+  }
+
   const nodes = useMemo<Card[]>(
     () =>
       definition.nodes.map((node, index) => ({
@@ -1461,9 +2030,7 @@ function Editor({
         type: 'workflow',
         position:
           (Object.hasOwn(moving, node.id) ? moving[node.id] : undefined) ??
-          (Object.hasOwn(definition.layout, node.id)
-            ? definition.layout[node.id]
-            : { x: index * 200, y: 0 }),
+          nodePosition(definition.layout, node.id, index),
         measured: measurements.get(node.id),
         selected: node.id === selection.node,
         data: {
@@ -1542,6 +2109,9 @@ function Editor({
             </span>{' '}
             Redo
           </button>
+          <button type="button" disabled={!definition.nodes.length} onClick={autoArrange}>
+            Auto Arrange
+          </button>
           <button
             type="button"
             disabled={!!operation || (!dirty && !!saved.revision) || !definition.name.trim()}
@@ -1553,7 +2123,12 @@ function Editor({
             className="wf-primary"
             type="button"
             disabled={
-              !!operation || activeRun || runDisabled || dirty || !saved.revision || !!issues.length
+              !!operation ||
+              runInProgress ||
+              runDisabled ||
+              dirty ||
+              !saved.revision ||
+              !!issues.length
             }
             onClick={execute}
           >
@@ -1562,6 +2137,17 @@ function Editor({
             </span>
             Run
           </button>
+          {enableWorkflowTests && (
+            <button
+              type="button"
+              ref={workflowTestButton}
+              aria-haspopup="dialog"
+              aria-controls={workflowTestId}
+              onClick={() => setWorkflowTestOpen(true)}
+            >
+              Test Workflow…
+            </button>
+          )}
           <button
             type="button"
             ref={traceLogButton}
@@ -1572,9 +2158,9 @@ function Editor({
             Trace Log
           </button>
         </div>
-        {error ? (
-          <p className="wf-toolbar-feedback" role="alert" title={error}>
-            {error}
+        {error || runLookupError ? (
+          <p className="wf-toolbar-feedback" role="alert" title={error || runLookupError}>
+            {error || runLookupError}
           </p>
         ) : (
           <div
@@ -1598,13 +2184,14 @@ function Editor({
 
       {releaseUrl && run?.waiting && (
         <section
+          key={waitId}
           className="wf-wait-panel"
           aria-label={waitingForInput ? 'Human input' : 'Wait for call'}
         >
           <CallbackUrl path={releaseUrl} />
           {waitingForInput ? (
             <HumanInputForm
-              key={run.waiting.nodeId}
+              key={waitId}
               form={waitingForInput}
               busy={!!operation}
               onSubmit={release}
@@ -1616,7 +2203,7 @@ function Editor({
                 <textarea
                   rows={2}
                   value={releasePayload}
-                  onChange={(event) => setReleasePayload(event.target.value)}
+                  onChange={(event) => setReleaseDraft({ waitId, text: event.target.value })}
                 />
               </label>
               <button
@@ -1664,6 +2251,9 @@ function Editor({
             edges={edges}
             nodeTypes={nodeTypes}
             fitView
+            onInit={(instance) => {
+              canvas.current = instance
+            }}
             minZoom={0.2}
             maxZoom={2}
             edgesReconnectable={false}
@@ -1749,7 +2339,13 @@ function Editor({
                         node={selected}
                         field={field}
                         setConfig={(config) => updateNode(selected.id, { config })}
-                        bodyPicker={{ base, request, workflowId: document.id, catalog }}
+                        bodyPicker={{
+                          base,
+                          request,
+                          workflowId: document.id,
+                          catalog,
+                          allowWaits: selected.type === 'workflow:loop'
+                        }}
                       />
                     )
                     if (selected.type !== 'workflow:http') return fields.map(renderField)
@@ -1763,6 +2359,42 @@ function Editor({
                       </>
                     )
                   })())}
+              {descriptor?.inputs?.map((field) => (
+                <InputBindingPicker
+                  key={`${selected.id}:${field.key}`}
+                  field={field}
+                  binding={
+                    Object.hasOwn(selected.bindings ?? {}, field.key)
+                      ? selected.bindings?.[field.key]
+                      : undefined
+                  }
+                  definition={definition}
+                  descriptors={descriptors}
+                  outputs={outputs}
+                  sources={sources}
+                  possibleSources={possibleSources}
+                  invalidBranchBinding={issues.some(
+                    (issue) =>
+                      issue.code === 'invalid_branch_binding' &&
+                      issue.nodeId === selected.id &&
+                      issue.field === field.key
+                  )}
+                  onChange={(binding) => {
+                    const bindings = { ...selected.bindings }
+                    if (binding) {
+                      Object.defineProperty(bindings, field.key, {
+                        value: binding,
+                        enumerable: true,
+                        configurable: true,
+                        writable: true
+                      })
+                    } else {
+                      delete bindings[field.key]
+                    }
+                    updateNode(selected.id, { bindings })
+                  }}
+                />
+              ))}
               {descriptor && (
                 <NodeTest
                   key={selected.id}
@@ -1771,68 +2403,54 @@ function Editor({
                   base={base}
                   request={request}
                   input={runInput}
+                  sample={boundSample(
+                    selected,
+                    descriptor.inputs ?? [],
+                    outputs,
+                    sources,
+                    possibleSources
+                  )}
                 />
               )}
-              {descriptor?.inputs?.map((field) => {
-                const binding = Object.hasOwn(selected.bindings ?? {}, field.key)
-                  ? selected.bindings?.[field.key]
-                  : undefined
-                const current = binding ? JSON.stringify([binding.nodeId, binding.field]) : ''
-                const choices = definition.nodes.flatMap((node, index) => {
-                  if (!sources.has(node.id)) return []
-                  const source = descriptors.get(nodeKey(node.type, node.version))
-                  return (source?.outputs ?? [])
-                    .filter((output) => acceptsOutput(field, output))
-                    .map((output) => ({
-                      value: JSON.stringify([node.id, output.key]),
-                      label: `${index + 1}. ${node.label || source?.label} · ${output.label}`,
-                      binding: { nodeId: node.id, field: output.key }
-                    }))
-                })
-                return (
-                  <label className="wf-field" key={field.key}>
-                    {field.label}
-                    <select
-                      value={current}
-                      onChange={(event) => {
-                        const choice = choices.find((item) => item.value === event.target.value)
-                        const bindings = { ...selected.bindings }
-                        if (choice)
-                          Object.defineProperty(bindings, field.key, {
-                            value: choice.binding,
-                            enumerable: true,
-                            configurable: true,
-                            writable: true
-                          })
-                        else delete bindings[field.key]
-                        updateNode(selected.id, { bindings })
-                      }}
-                    >
-                      <option value="">Choose an output…</option>
-                      {current && !choices.some((item) => item.value === current) && (
-                        <option value={current}>Unavailable output</option>
-                      )}
-                      {choices.map(({ value, label }) => (
-                        <option key={value} value={value}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )
-              })}
             </>
           )}
-          {selection.edge && (
-            <button
-              type="button"
-              className="wf-destructive"
-              onClick={() => removeSelection([], [selection.edge!])}
-            >
-              Delete connection
-            </button>
+          {selectedEdge && (
+            <>
+              <div className="wf-node-actions">
+                <button
+                  type="button"
+                  className="wf-destructive"
+                  onClick={() => removeSelection([], [selectedEdge.id])}
+                >
+                  Delete connection
+                </button>
+              </div>
+              <label className="wf-field">
+                Insert node
+                <select
+                  value=""
+                  disabled={definition.nodes.length >= 100 || definition.edges.length >= 400}
+                  onChange={(event) => {
+                    const item = descriptors.get(event.currentTarget.value)
+                    if (item) insertNode(selectedEdge.id, item)
+                  }}
+                >
+                  <option value="">Choose a node…</option>
+                  {palette
+                    .flatMap(([, items]) => items.filter(({ ports }) => ports.length === 1))
+                    .map((item) => (
+                      <option
+                        key={nodeKey(item.type, item.version)}
+                        value={nodeKey(item.type, item.version)}
+                      >
+                        {item.label}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </>
           )}
-          {!selected && !selection.edge && <p>Select a node to edit its settings.</p>}
+          {!selected && !selectedEdge && <p>Select a node to edit its settings.</p>}
           {!!issues.length && (
             <details className="wf-issues">
               <summary>
@@ -1840,10 +2458,7 @@ function Editor({
               </summary>
               <ul>
                 {issues.map((issue, index) => (
-                  <li key={index}>
-                    {formatIssue?.(issue) ??
-                      `${issue.code.replaceAll('_', ' ')}${issue.field ? ` · ${issue.field}` : ''}`}
-                  </li>
+                  <li key={index}>{issueText(issue)}</li>
                 ))}
               </ul>
             </details>
@@ -1851,17 +2466,37 @@ function Editor({
         </aside>
       </div>
 
+      {enableWorkflowTests && (
+        <WorkflowTestDialog
+          id={workflowTestId}
+          open={workflowTestOpen}
+          workflowId={document.id}
+          definition={definition}
+          descriptors={descriptors}
+          defaultInput={runInput}
+          loadBody={loadTestBody}
+          onRun={testWorkflow}
+          renderSteps={(run) => (
+            <RunSteps key={run.id} runId={run.id} run={run} descriptors={descriptors} />
+          )}
+          onClose={closeWorkflowTest}
+        />
+      )}
       {traceLogOpen && (
         <TraceLog
           id={traceLogId}
           runId={runId}
-          runUrl={runUrl}
           run={run}
           status={runStatus}
+          workflowUrl={url}
+          base={base}
+          request={request}
           descriptors={descriptors}
           busy={!!operation}
-          loadError={runId && !run ? error : undefined}
+          runInProgress={runInProgress}
+          loadError={runId && !run ? runLookupError : undefined}
           onRefresh={refreshRun}
+          onOpenWaitingRun={openWaitingRun}
           onClose={closeTraceLog}
         />
       )}

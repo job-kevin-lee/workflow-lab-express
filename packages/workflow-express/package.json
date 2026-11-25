@@ -1,7 +1,18 @@
 {
   "name": "@ideawithai/workflow-express",
   "version": "0.1.0",
+  "description": "Embeddable workflow execution and node registration for Express 5.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/job-kevin-lee/workflow-lab-express.git",
+    "directory": "packages/workflow-express"
+  },
+  "homepage": "https://github.com/job-kevin-lee/workflow-lab-express/tree/main/packages/workflow-express",
+  "bugs": "https://github.com/job-kevin-lee/workflow-lab-express/issues",
+  "engines": {
+    "node": ">=22"
+  },
   "files": [
     "dist"
   ],

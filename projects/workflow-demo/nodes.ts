@@ -1,17 +1,10 @@
 import {
+  builtinWorkflowNodes,
   createHttpRequestNode,
-  humanInputNode,
-  inputNode,
-  iterationNode,
-  logicNode,
-  loopNode,
-  resultNode,
-  waitNode,
-  waitForCallNode,
   type WorkflowNodeRegistration
 } from '@ideawithai/workflow-express'
 
-import { finishGuess, guessRound } from './guess-number-nodes.js'
+import { checkGuess, finishGuess, guessPrompt, guessRound } from './guess-number-nodes.js'
 import { stockCheckNode } from './stock-check-node.js'
 
 function demoRequest(url: URL, init: RequestInit): Promise<Response> {
@@ -21,20 +14,15 @@ function demoRequest(url: URL, init: RequestInit): Promise<Response> {
 }
 
 export const nodesForDemo = (loopbackOrigin: string): WorkflowNodeRegistration[] => [
-  logicNode,
-  humanInputNode,
-  iterationNode,
-  loopNode,
-  waitNode,
+  ...builtinWorkflowNodes,
   createHttpRequestNode({
     origin: loopbackOrigin,
     allowedOrigins: ['https://api.github.com', 'https://example.com'],
     request: demoRequest
   }),
-  inputNode,
-  waitForCallNode,
-  resultNode,
   stockCheckNode,
+  guessPrompt,
+  checkGuess,
   guessRound,
   finishGuess
 ]

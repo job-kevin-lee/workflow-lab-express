@@ -1,20 +1,25 @@
-import type {
-  JsonObject,
-  LogicCondition,
-  WorkflowDefinition,
-  WorkflowEdge,
-  WorkflowNode
-} from '@ideawithai/workflow-express/schema'
+import type { LogicCondition, WorkflowDefinition } from '@ideawithai/workflow-express/schema'
+import { edge, graph, node, result } from './example-graph.js'
+import { gameBodies, gameBodyExamples, games } from './game-examples.js'
+
+const guessExample = { id: 'guess-a-number-loop', label: 'Guess a number' } as const
+
+export const gameExampleNames = [
+  guessExample,
+  ...Object.entries(games).map(([id, { name }]) => ({ id, label: name }))
+]
 
 export const exampleNames = [
-  { id: 'guess-a-number', label: 'Guess a number' },
   { id: 'check-ready', label: 'Ready data' },
   { id: 'check-unmatched', label: 'Unmatched data' },
   { id: 'check-github', label: 'Live GitHub data' },
   { id: 'collect-quantity', label: 'Human input' },
   { id: 'iterate-inventory', label: 'Iteration' },
   { id: 'repeat-until-ready', label: 'Loop' },
-  { id: 'check-inventory-stock', label: 'Stock check (custom node)' }
+  { id: 'check-inventory-stock', label: 'Stock check (custom node)' },
+  { id: 'format-inventory', label: 'Map JSON and Template' },
+  { id: 'find-inventory-item', label: 'Look up an inventory item' },
+  { id: 'supplier-quote', label: 'Read a supplier quote' }
 ] as const
 
 export const numberGame = {
@@ -22,7 +27,9 @@ export const numberGame = {
   maximum: 100,
   attempts: 10,
   roundType: 'lab:guess-round',
-  finishType: 'lab:finish-guess'
+  finishType: 'lab:finish-guess',
+  promptType: 'lab:guess-prompt',
+  checkType: 'lab:check-guess'
 } as const
 
 export const bodyExampleNames = [
@@ -31,23 +38,10 @@ export const bodyExampleNames = [
     label: 'Inspect inventory item',
     input: { item: { sku: 'A-01', quantity: 4 }, index: 0 }
   },
-  { id: 'loop-index-body', label: 'Read pass index', input: { index: 0, previous: null } }
+  { id: 'loop-index-body', label: 'Read pass index', input: { index: 0, previous: null } },
+  { id: 'guess-turn', label: 'Guess a number · One turn', input: { index: 0, previous: null } },
+  ...gameBodyExamples
 ] as const
-
-const node = (id: string, type: string, label: string, config: JsonObject): WorkflowNode => ({
-  id,
-  type: `workflow:${type}`,
-  label,
-  config,
-  version: 1
-})
-
-const edge = (from: string, port: string, to: string): WorkflowEdge => ({
-  id: `${from}-${port}`,
-  from,
-  port,
-  to
-})
 
 function buildExample(name: string, url: string, conditions: LogicCondition[]): WorkflowDefinition {
   return {
@@ -110,30 +104,6 @@ const rules: LogicCondition[] = [
   { path: 'status', operator: 'eq', expected: '"ready"' },
   { path: 'count', operator: 'gte', expected: '1' }
 ]
-
-function graph(name: string, nodes: WorkflowNode[], edges: WorkflowEdge[]): WorkflowDefinition {
-  return {
-    schemaVersion: 1,
-    name,
-    entry: nodes[0].id,
-    nodes,
-    edges,
-    layout: Object.fromEntries(nodes.map(({ id }, index) => [id, { x: index * 235, y: 42 }]))
-  }
-}
-
-function result(
-  id: string,
-  label: string,
-  message: string,
-  source?: { nodeId: string; field: string },
-  tone?: 'success' | 'error'
-): WorkflowNode {
-  return {
-    ...node(id, 'result', label, { message, ...(tone && { tone }) }),
-    ...(source && { bindings: { value: source } })
-  }
-}
 
 function bodyWorkflow(name: string, path: string): WorkflowDefinition {
   return graph(
@@ -210,49 +180,56 @@ const repeatUntilReady = graph(
 )
 repeatUntilReady.layout.limit = { x: 235, y: 151 }
 
-const guessingRounds: WorkflowNode[] = Array.from({ length: numberGame.attempts - 1 }, (_, i) => {
-  const attempt = i + 2
-  return {
-    id: `guess-${attempt}`,
-    type: numberGame.roundType,
-    version: 1,
-    label: `Guess ${attempt}`,
-    config: { attempt },
-    bindings: { guess: { nodeId: `guess-${attempt - 1}`, field: 'payload' } }
-  }
-})
+const guessTurn = graph(
+  'Guess a number · One turn',
+  [
+    { id: 'prompt', type: numberGame.promptType, config: {}, version: 1 },
+    {
+      ...node('guess', 'human-input', 'Enter a guess', {
+        message: 'Guess a number from 1 to 100.',
+        label: 'Your guess',
+        type: 'number'
+      }),
+      bindings: { prompt: { nodeId: 'prompt', field: 'text' } }
+    },
+    {
+      id: 'check',
+      type: numberGame.checkType,
+      version: 1,
+      config: {},
+      bindings: { guess: { nodeId: 'guess', field: 'payload' } }
+    }
+  ],
+  [edge('prompt', 'next', 'guess'), edge('guess', 'submitted', 'check')]
+)
 
 const guessANumber = graph(
   'Guess a number',
   [
-    node('guess-1', 'human-input', 'Guess 1', {
-      message: `I picked a whole number from ${numberGame.minimum} to ${numberGame.maximum}. Guess 1 of ${numberGame.attempts}.`,
-      label: 'Your guess',
-      type: 'number'
+    node('loop', 'loop', 'Guess up to ten times', {
+      workflowId: 'guess-turn',
+      maxCount: numberGame.attempts,
+      conditions: [{ path: 'correct', operator: 'eq', expected: 'true' }]
     }),
-    ...guessingRounds,
-    result('win', 'Correct guess', 'You guessed the number.', undefined, 'success'),
     {
-      id: 'finish',
-      type: numberGame.finishType,
-      version: 1,
-      config: {},
-      bindings: { guess: { nodeId: `guess-${numberGame.attempts}`, field: 'payload' } }
+      ...node('win', 'result', 'Correct guess', {
+        message: 'You guessed the number.',
+        tone: 'success'
+      }),
+      bindings: { message: { nodeId: 'loop', field: 'last', path: ['message'] } }
+    },
+    {
+      ...node('limit', 'result', 'Out of guesses', {
+        message: 'You used all ten guesses.',
+        tone: 'warning'
+      }),
+      bindings: { message: { nodeId: 'loop', field: 'last', path: ['message'] } }
     }
   ],
-  [
-    edge('guess-1', 'submitted', guessingRounds[0].id),
-    ...guessingRounds.flatMap(({ id }, i) => [
-      edge(id, 'submitted', guessingRounds[i + 1]?.id ?? 'finish'),
-      edge(id, 'correct', 'win')
-    ])
-  ]
+  [edge('loop', 'done', 'win'), edge('loop', 'limit', 'limit')]
 )
-for (const [i, { id }] of guessANumber.nodes.slice(0, numberGame.attempts).entries()) {
-  guessANumber.layout[id] = { x: (i % 5) * 225, y: i < 5 ? 32 : 235 }
-}
-guessANumber.layout.win = { x: 1125, y: 133 }
-guessANumber.layout.finish = { x: 1125, y: 235 }
+guessANumber.layout.win = { x: 260, y: 10 }
+guessANumber.layout.limit = { x: 260, y: 150 }
 
 const checkInventoryStock = graph(
   'Check inventory stock',
@@ -288,7 +265,137 @@ const checkInventoryStock = graph(
 checkInventoryStock.layout.stocked = { x: 470, y: 162 }
 checkInventoryStock.layout.error = { x: 235, y: 162 }
 
+const formatInventory = graph(
+  'Format inventory JSON',
+  [
+    node('fetch', 'http', 'Fetch inventory', { method: 'GET', url: '/api/demo/resources/items' }),
+    {
+      ...node('map', 'map-json', 'Select the first item', {
+        mapping: JSON.stringify({ sku: '[0].sku', quantity: '[0].quantity' }, null, 2)
+      }),
+      bindings: { value: { nodeId: 'fetch', field: 'body' } }
+    },
+    {
+      ...node('text', 'template', 'Create an inventory note', {
+        template: 'Item {{sku}} has {{quantity}} units in stock.'
+      }),
+      bindings: { value: { nodeId: 'map', field: 'value' } }
+    },
+    {
+      ...node('done', 'result', 'Inventory note', {
+        message: 'Inventory mapped.',
+        tone: 'success'
+      }),
+      bindings: { message: { nodeId: 'text', field: 'text' } }
+    },
+    result('error', 'Inventory unavailable', 'The inventory request failed.', undefined, 'error')
+  ],
+  [
+    edge('fetch', 'ok', 'map'),
+    edge('fetch', 'error', 'error'),
+    edge('map', 'next', 'text'),
+    edge('text', 'next', 'done')
+  ]
+)
+formatInventory.layout.error = { x: 235, y: 170 }
+
+const findInventoryItem = graph(
+  'Look up an inventory item',
+  [
+    node('sku', 'human-input', 'Enter a SKU', {
+      message: 'Look up an inventory item. Try A-01, B-07 or C-03.',
+      label: 'SKU',
+      type: 'text'
+    }),
+    {
+      ...node('query', 'map-json', 'Build query parameters', {
+        mapping: JSON.stringify({ sku: 'value' }, null, 2)
+      }),
+      bindings: { value: { nodeId: 'sku', field: 'payload' } }
+    },
+    {
+      ...node('fetch', 'http', 'Find the item', {
+        method: 'GET',
+        url: '/api/demo/resources/items'
+      }),
+      bindings: { query: { nodeId: 'query', field: 'value' } }
+    },
+    result('done', 'Look-up complete', 'Open Trace Log to see the matching items.', {
+      nodeId: 'fetch',
+      field: 'body'
+    }),
+    result('error', 'Inventory unavailable', 'The inventory request failed.', undefined, 'error')
+  ],
+  [
+    edge('sku', 'submitted', 'query'),
+    edge('query', 'next', 'fetch'),
+    edge('fetch', 'ok', 'done'),
+    edge('fetch', 'error', 'error')
+  ]
+)
+findInventoryItem.layout.error = { x: 705, y: 170 }
+
+const supplierQuote = graph(
+  'Read a supplier quote',
+  [
+    node('pick', 'human-input', 'Choose a supplier', {
+      message: 'Request a quote from the primary supplier? Choose No for the backup supplier.',
+      label: 'Use primary supplier',
+      type: 'boolean'
+    }),
+    {
+      ...node('route', 'logic', 'Primary supplier?', {
+        mode: 'all',
+        conditions: [{ path: 'value', operator: 'eq', expected: 'true' }]
+      }),
+      bindings: { value: { nodeId: 'pick', field: 'payload' } }
+    },
+    node('primary', 'http', 'Primary quote', {
+      method: 'GET',
+      url: '/api/demo/resources/supplier-quote?source=primary'
+    }),
+    node('backup', 'http', 'Backup quote', {
+      method: 'GET',
+      url: '/api/demo/resources/supplier-quote?source=backup'
+    }),
+    {
+      ...node('summary', 'template', 'Format the selected quote', {
+        template: '{{supplier}} quotes {{price}} {{currency}}.'
+      }),
+      bindings: {
+        value: {
+          branches: [
+            { nodeId: 'primary', field: 'body' },
+            { nodeId: 'backup', field: 'body' }
+          ]
+        }
+      }
+    },
+    {
+      ...result('done', 'Quote received', 'The supplier returned a quote.', undefined, 'success'),
+      bindings: { message: { nodeId: 'summary', field: 'text' } }
+    },
+    result('error', 'Quote unavailable', 'The supplier request failed.', undefined, 'error')
+  ],
+  [
+    edge('pick', 'submitted', 'route'),
+    edge('route', 'yes', 'primary'),
+    edge('route', 'no', 'backup'),
+    edge('primary', 'ok', 'summary'),
+    edge('backup', 'ok', 'summary'),
+    edge('primary', 'error', 'error'),
+    edge('backup', 'error', 'error'),
+    edge('summary', 'next', 'done')
+  ]
+)
+supplierQuote.layout.backup = { x: 470, y: 190 }
+supplierQuote.layout.summary = { x: 705, y: 42 }
+supplierQuote.layout.error = { x: 705, y: 190 }
+supplierQuote.layout.done = { x: 940, y: 42 }
+
 export const examples: Record<string, WorkflowDefinition> = {
+  ...gameBodies,
+  ...games,
   'check-ready': buildExample('Check ready data', '/api/demo/resources/ready', rules),
   'check-unmatched': buildExample('Check unmatched data', '/api/demo/resources/unmatched', rules),
   'check-github': buildExample(
@@ -302,8 +409,12 @@ export const examples: Record<string, WorkflowDefinition> = {
   'collect-quantity': collectQuantity,
   'iterate-inventory': iterateInventory,
   'repeat-until-ready': repeatUntilReady,
-  'guess-a-number': guessANumber,
+  [guessExample.id]: guessANumber,
+  'guess-turn': guessTurn,
   'check-inventory-stock': checkInventoryStock,
+  'format-inventory': formatInventory,
+  'find-inventory-item': findInventoryItem,
+  'supplier-quote': supplierQuote,
   'inventory-item-body': bodyWorkflow('Inspect inventory item', 'item'),
   'loop-index-body': bodyWorkflow('Read pass index', 'index')
 }

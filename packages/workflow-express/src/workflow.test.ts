@@ -249,7 +249,8 @@ test('run history stores the HTTP request alongside its response and masks crede
   })
   expect(started.status).toBe(201)
   const stored = await (await request('/runs/request-log-run')).json()
-  expect(stored.steps[0]).toEqual({
+  expect(stored.steps[0].durationMs).toBeGreaterThanOrEqual(0)
+  expect(stored.steps[0]).toMatchObject({
     nodeId: 'fetch',
     port: 'ok',
     output: { status: 200, body: { ready: true } },

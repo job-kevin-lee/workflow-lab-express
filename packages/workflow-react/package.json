@@ -1,7 +1,15 @@
 {
   "name": "@ideawithai/workflow-react",
   "version": "0.1.0",
+  "description": "Embeddable React 19 workflow editor with a node canvas, inspector, and run traces.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/job-kevin-lee/workflow-lab-express.git",
+    "directory": "packages/workflow-react"
+  },
+  "homepage": "https://github.com/job-kevin-lee/workflow-lab-express/tree/main/packages/workflow-react",
+  "bugs": "https://github.com/job-kevin-lee/workflow-lab-express/issues",
   "files": [
     "dist",
     "styles.css"

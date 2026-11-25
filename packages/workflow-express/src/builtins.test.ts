@@ -60,6 +60,62 @@ test('HTTP rejects other origins and routes network failures to the error port',
   expect(calls).toBe(1)
 })
 
+test('HTTP binds a URL and replaces selected query fields before the request', async () => {
+  const node = createHttpRequestNode({
+    origin: 'http://example.test',
+    request: async (url) => {
+      expect(url.pathname).toBe('/orders/A-01')
+      expect([...url.searchParams]).toEqual([
+        ['source', 'lab'],
+        ['tag', 'north/west'],
+        ['tag', 'ready for pickup'],
+        ['size', '10'],
+        ['active', 'false']
+      ])
+      return Response.json({ found: true })
+    }
+  })
+  expect(
+    await node.execute({
+      ...context,
+      config: { method: 'GET', url: '/unused' },
+      inputs: {
+        url: '/orders/A-01?source=lab&tag=old&obsolete=1',
+        query: { tag: ['north/west', 'ready for pickup'], size: 10, active: false, obsolete: null }
+      }
+    })
+  ).toMatchObject({
+    port: 'ok',
+    httpRequest: {
+      url: 'http://example.test/orders/A-01?source=lab&tag=north%2Fwest&tag=ready+for+pickup&size=10&active=false'
+    }
+  })
+})
+
+test('HTTP rejects invalid dynamic targets and query values before any request', async () => {
+  let calls = 0
+  const node = createHttpRequestNode({
+    origin: 'https://example.test',
+    request: async () => {
+      calls++
+      return Response.json({})
+    }
+  })
+  const fixed = { ...context, config: { method: 'GET', url: '/fallback' } }
+  for (const url of ['https://another.test/orders', 'blob:https://example.test/identifier']) {
+    await expect(node.execute({ ...fixed, inputs: { url } })).rejects.toMatchObject({
+      code: 'invalid_http_origin'
+    })
+  }
+  await expect(node.execute({ ...fixed, inputs: { url: '' } })).rejects.toMatchObject({
+    code: 'invalid_http_url'
+  })
+  await expect(
+    node.execute({ ...fixed, inputs: { query: { invalid: { nested: true } } } })
+  ).rejects.toMatchObject({ code: 'invalid_http_query' })
+  expect(calls).toBe(0)
+})
+
 test('conditions compare nested JSON with strict value types', async () => {
   const config = { path: 'data.0.power', operator: 'lt', expected: '25' }
   expect(

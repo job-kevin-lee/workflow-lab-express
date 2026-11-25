@@ -3,16 +3,19 @@ import { createRoot } from 'react-dom/client'
 import { WorkflowEditor } from '@ideawithai/workflow-react'
 import { createEmptyWorkflow, type WorkflowDocument } from '@ideawithai/workflow-express/schema'
 import '@ideawithai/workflow-react/styles.css'
-import { bodyExampleNames, exampleNames, examples } from './examples.js'
+import { bodyExampleNames, exampleNames, examples, gameExampleNames } from './examples.js'
 import {
   WorkflowDialog,
   WorkflowLibrary,
   type WorkflowDialogAction,
   type WorkflowGroup
 } from './workflow-library.js'
+import { ImportWorkflowDialog, WorkflowTriggersDialog } from './workflow-tools.js'
+import type { WorkflowImportResult } from './workflow-sharing.js'
 import './demo.css'
 
 const workflowGroups = [
+  { label: 'Games', items: gameExampleNames },
   { label: 'Examples', items: exampleNames },
   { label: 'Reusable workflows', items: bodyExampleNames }
 ]
@@ -22,14 +25,15 @@ const selectionKey = 'workflow-demo:open'
 class WorkflowRequestError extends Error {
   constructor(
     readonly status: number,
-    readonly code: string
+    readonly code: string,
+    detail?: string
   ) {
     const messages: Record<string, string> = {
       revision_conflict: 'This workflow changed in another session. Refresh before trying again.',
       workflow_in_use: 'Another saved workflow uses this workflow as its Iteration or Loop body.',
       invalid_definition: 'Enter a workflow name of up to 160 characters.'
     }
-    super(messages[code] ?? 'The workflow could not be changed. Try again.')
+    super(detail ?? messages[code] ?? 'The workflow could not be changed. Try again.')
   }
 }
 
@@ -41,8 +45,8 @@ async function workflowRequest(path: string, init?: RequestInit): Promise<Respon
     throw new Error('Could not reach Workflow Lab. Try again.')
   }
   if (!response.ok) {
-    const data: { error?: string } = await response.json().catch(() => ({}))
-    throw new WorkflowRequestError(response.status, data.error ?? '')
+    const data: { error?: string; message?: string } = await response.json().catch(() => ({}))
+    throw new WorkflowRequestError(response.status, data.error ?? '', data.message)
   }
   return response
 }
@@ -78,10 +82,11 @@ function libraryGroups(documents: WorkflowDocument[]): WorkflowGroup[] {
   ]
 }
 
-function exportWorkflow({ definition }: WorkflowDocument): void {
-  const file = URL.createObjectURL(
-    new Blob([`${JSON.stringify(definition, null, 2)}\n`], { type: 'application/json' })
+async function downloadWorkflow({ id, revision, definition }: WorkflowDocument): Promise<void> {
+  const response = await workflowRequest(
+    `/api/demo/workflows/${encodeURIComponent(id)}/export?revision=${revision}`
   )
+  const file = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
   link.href = file
   link.download = `${
@@ -107,6 +112,9 @@ function App(): ReactElement {
   const [dialog, setDialog] = useState<WorkflowDialogAction>()
   const [dirty, setDirty] = useState(false)
   const [nextExample, setNextExample] = useState<string>()
+  const [tool, setTool] = useState<'import' | 'triggers'>()
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
   const current = activeDocument?.id === workflow ? activeDocument : undefined
 
   useEffect(() => {
@@ -119,7 +127,7 @@ function App(): ReactElement {
         const previous = sessionStorage.getItem(selectionKey)
         setWorkflow(
           list.find(({ id }) => id === previous)?.id ??
-            list.find(({ id }) => id === exampleNames[0].id)?.id ??
+            list.find(({ id }) => id === gameExampleNames[0].id)?.id ??
             list[0]?.id
         )
         setLoading(false)
@@ -178,6 +186,25 @@ function App(): ReactElement {
     if (!id) sessionStorage.removeItem(selectionKey)
   }
 
+  function acceptImport({ rootId, documents: imported }: WorkflowImportResult): void {
+    setDocuments((list) => [...list, ...imported])
+    selectWorkflow(rootId)
+  }
+
+  async function exportCurrent(document: WorkflowDocument): Promise<void> {
+    setExporting(true)
+    setExportError('')
+    try {
+      await downloadWorkflow(document)
+    } catch (failure) {
+      setExportError(
+        failure instanceof Error ? failure.message : 'The workflow could not be exported.'
+      )
+    } finally {
+      setExporting(false)
+    }
+  }
+
   async function confirmWorkflowAction(name: string): Promise<void> {
     if (!dialog) return
     if (dialog.type === 'create') {
@@ -224,7 +251,7 @@ function App(): ReactElement {
     <main className="demo">
       <header className="demo-heading">
         <div className="demo-navigation">
-          <h1>Workflow Lab</h1>
+          <h1>Workflow Lab Express</h1>
           <WorkflowLibrary
             workflow={workflow}
             groups={libraryGroups(documents)}
@@ -241,12 +268,18 @@ function App(): ReactElement {
           >
             New Workflow…
           </button>
+          <button type="button" disabled={loading} onClick={() => setTool('import')}>
+            Import JSON…
+          </button>
           <button
             type="button"
-            disabled={!current}
-            onClick={() => current && exportWorkflow(current)}
+            disabled={!current || exporting}
+            onClick={() => current && void exportCurrent(current)}
           >
-            {dirty ? 'Export Saved JSON' : 'Export JSON'}
+            {exporting ? 'Exporting…' : dirty ? 'Export Saved JSON' : 'Export JSON'}
+          </button>
+          <button type="button" disabled={!current} onClick={() => setTool('triggers')}>
+            Triggers…
           </button>
           <button
             className="demo-destructive"
@@ -259,6 +292,12 @@ function App(): ReactElement {
           </button>
         </div>
       </header>
+
+      {exportError && (
+        <p className="demo-export-error" role="alert">
+          {exportError}
+        </p>
+      )}
 
       {nextExample && dirty && (
         <section className="demo-switch-warning" aria-label="Unsaved changes">
@@ -278,6 +317,7 @@ function App(): ReactElement {
         <WorkflowEditor
           apiBase="/api/workflow"
           workflowId={workflow}
+          enableWorkflowTests
           documentTarget={documentTarget}
           runInput={bodyExampleNames.find(({ id }) => id === workflow)?.input}
           onLoaded={onLoaded}
@@ -302,6 +342,22 @@ function App(): ReactElement {
             </button>
           )}
         </section>
+      )}
+      {tool === 'import' && (
+        <ImportWorkflowDialog
+          request={workflowRequest}
+          onImported={acceptImport}
+          onClose={() => setTool(undefined)}
+        />
+      )}
+      {tool === 'triggers' && current && (
+        <WorkflowTriggersDialog
+          key={current.id}
+          workflowId={current.id}
+          name={current.definition.name}
+          request={workflowRequest}
+          onClose={() => setTool(undefined)}
+        />
       )}
       {dialog && (
         <WorkflowDialog

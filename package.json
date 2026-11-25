@@ -2,11 +2,15 @@
   "name": "workflow-lab-express",
   "private": true,
   "packageManager": "bun@1.4.4",
-  "workspaces": ["packages/*", "projects/workflow-demo"],
+  "workspaces": [
+    "packages/*",
+    "projects/workflow-demo"
+  ],
   "scripts": {
     "build": "bun run --filter @ideawithai/workflow-express build && bun run --filter @ideawithai/workflow-react build && bun run --filter @ideawithai/workflow-demo build",
     "start": "bun run --filter @ideawithai/workflow-demo start",
-    "test": "bun test packages/workflow-express",
+    "smoke:packages": "node scripts/smoke-packages.mjs",
+    "test": "bun test packages/workflow-express packages/workflow-react",
     "typecheck": "bun run --workspaces typecheck"
   },
   "devDependencies": {

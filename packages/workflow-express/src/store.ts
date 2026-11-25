@@ -1,4 +1,10 @@
-import type { WorkflowDocument, WorkflowRun } from './schema.js'
+import {
+  summarizeWorkflowRun,
+  type WorkflowDocument,
+  type WorkflowRun,
+  type WorkflowRunListOptions,
+  type WorkflowRunSummary
+} from './schema.js'
 
 export type WorkflowRemoval =
   'deleted' | 'workflow_not_found' | 'revision_conflict' | 'workflow_in_use'
@@ -17,8 +23,9 @@ export interface WorkflowStore {
     referencesTarget: (document: WorkflowDocument) => boolean
   ): Promise<WorkflowRemoval>
   getRun(id: string): Promise<WorkflowRun | null>
+  listRuns?(workflowId: string, options: WorkflowRunListOptions): Promise<WorkflowRunSummary[]>
   createRun(run: WorkflowRun): Promise<boolean>
-  claimWaitingRun?(run: WorkflowRun, nodeId: string): Promise<boolean>
+  claimWaitingRun?(run: WorkflowRun, waitId: string): Promise<boolean>
   finishRun(run: WorkflowRun): Promise<void>
 }
 
@@ -54,14 +61,24 @@ export function createMemoryWorkflowStore(): WorkflowStore {
       return 'deleted'
     },
     getRun: async (id) => get(runs, id),
+    listRuns: async (workflowId, { status, limit, offset }) =>
+      [...runs.values()]
+        .reverse()
+        .filter((run) => run.workflowId === workflowId && (!status || run.status === status))
+        .slice(offset, offset + limit)
+        .map(summarizeWorkflowRun),
     createRun: async (run) => {
       if (runs.has(run.id)) return false
       runs.set(run.id, structuredClone(run))
       return true
     },
-    claimWaitingRun: async (run, nodeId) => {
+    claimWaitingRun: async (run, waitId) => {
       const current = runs.get(run.id)
-      if (current?.status !== 'waiting' || current.waiting?.nodeId !== nodeId) return false
+      if (
+        current?.status !== 'waiting' ||
+        (current.waiting?.id ?? current.waiting?.nodeId) !== waitId
+      )
+        return false
       runs.set(run.id, structuredClone(run))
       return true
     },

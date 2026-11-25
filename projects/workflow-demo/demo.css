@@ -282,3 +282,59 @@ body {
     margin-inline-start: 0;
   }
 }
+
+.demo-tool-dialog {
+  width: min(460px, calc(100% - 32px));
+}
+.demo-tool-dialog :is(form, .demo-trigger-webhook) {
+  display: grid;
+  align-items: start;
+  gap: 8px;
+}
+.demo-tool-dialog :is(input, textarea) {
+  width: 100%;
+  box-sizing: border-box;
+}
+.demo-tool-dialog :is(p, .demo-trigger-description) {
+  margin: 4px 0;
+}
+.demo-tool-dialog textarea {
+  min-height: 38px;
+  padding: 6px 8px;
+  border: 1px solid var(--demo-control-line);
+  border-radius: 6px;
+  background: var(--demo-control);
+  color: var(--demo-text);
+  font-size: 12px;
+  resize: vertical;
+}
+.demo-tool-dialog :is(input, textarea):focus-visible {
+  outline: 2px solid var(--demo-accent);
+  outline-offset: -2px;
+}
+.demo-tool-dialog button[type='submit'],
+.demo-trigger-webhook button {
+  justify-self: start;
+}
+.demo-trigger-webhook {
+  border-block-start: 1px solid var(--demo-border);
+  margin-top: 14px;
+  padding-top: 12px;
+}
+.demo-tool-dialog .demo-trigger-check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  color: var(--demo-text);
+}
+.demo-tool-dialog .demo-trigger-check input {
+  width: auto;
+  min-height: 0;
+  margin-inline: 0 4px;
+  accent-color: var(--demo-accent);
+}
+.demo-export-error {
+  margin: 6px 13px;
+  color: #a52338;
+  font-size: 13px;
+}

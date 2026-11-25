@@ -1,5 +1,6 @@
 import { setTimeout } from 'node:timers/promises'
 import type { WorkflowNodeRegistration } from './index.js'
+import { WorkflowNodeError } from './node-error.js'
 import {
   isJsonObject,
   isId,
@@ -9,6 +10,7 @@ import {
   type LogicCondition,
   type WorkflowHumanInput
 } from './schema.js'
+import { mapJsonNode, templateNode } from './transform.js'
 
 const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']
 const operators = ['eq', 'ne', 'lt', 'lte', 'gt', 'gte']
@@ -21,6 +23,25 @@ function read(value: JsonValue, path: string): JsonValue | undefined {
     else return undefined
   }
   return current
+}
+
+function applyQuery(url: URL, query: JsonValue): void {
+  const invalidQuery = (): WorkflowNodeError =>
+    new WorkflowNodeError(
+      'invalid_http_query',
+      'Query parameters must be an object with text, numbers, booleans, or arrays of those values.'
+    )
+  if (!isJsonObject(query)) throw invalidQuery()
+  for (const [name, value] of Object.entries(query)) {
+    url.searchParams.delete(name)
+    if (value === null) continue
+    const values = Array.isArray(value) ? value : [value]
+    for (const item of values) {
+      if (typeof item !== 'string' && typeof item !== 'number' && typeof item !== 'boolean')
+        throw invalidQuery()
+      url.searchParams.append(name, String(item))
+    }
+  }
 }
 
 export function createHttpRequestNode(options: {
@@ -45,12 +66,34 @@ export function createHttpRequestNode(options: {
       description: 'Call an endpoint and branch on the response.',
       fields: [
         { key: 'method', label: 'Method', type: 'string', options: methods, required: true },
-        { key: 'url', label: 'URL or path', type: 'string', required: true },
+        {
+          key: 'url',
+          label: 'URL or path',
+          type: 'string',
+          required: true,
+          alternativeInput: 'url'
+        },
         { key: 'headers', label: 'Headers (JSON object)', type: 'string', multiline: true },
         { key: 'body', label: 'Request body (JSON)', type: 'string', multiline: true },
         { key: 'successPath', label: 'Success field (optional)', type: 'string' }
       ],
-      inputs: [{ key: 'body', label: 'Body from previous output', type: 'json' }],
+      inputs: [
+        { key: 'body', label: 'Body from previous output', type: 'json' },
+        {
+          key: 'url',
+          label: 'URL or path from previous output',
+          type: 'string',
+          description:
+            'Overrides the configured URL with a path such as /api/orders/A-01 or a URL on an allowed origin.'
+        },
+        {
+          key: 'query',
+          label: 'Query parameters from previous output',
+          type: 'json',
+          description:
+            'Properties replace matching query parameters. Arrays repeat a key. Null removes it.'
+        }
+      ],
       outputs: [
         { key: 'status', label: 'HTTP status', type: 'number', required: true },
         { key: 'body', label: 'Response body', type: 'json', required: true }
@@ -61,9 +104,26 @@ export function createHttpRequestNode(options: {
       ]
     },
     async execute({ config, inputs, signal }) {
-      const url = new URL(String(config.url), origin)
-      if (!allowedOrigins.has(url.origin) || url.username || url.password)
-        throw new Error('HTTP URL is outside the configured origin')
+      const address = inputs.url ?? config.url
+      if (typeof address !== 'string' || !address.trim())
+        throw new WorkflowNodeError('invalid_http_url', 'Enter a URL or path.')
+      let url: URL
+      try {
+        url = new URL(address, origin)
+      } catch {
+        throw new WorkflowNodeError('invalid_http_url', 'Enter a valid HTTP URL or path.')
+      }
+      if (
+        (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+        !allowedOrigins.has(url.origin) ||
+        url.username ||
+        url.password
+      )
+        throw new WorkflowNodeError(
+          'invalid_http_origin',
+          'HTTP URL is outside the configured origin.'
+        )
+      if (Object.hasOwn(inputs, 'query')) applyQuery(url, inputs.query)
       const method = String(config.method)
       const headerData: unknown = config.headers ? JSON.parse(String(config.headers)) : {}
       if (
@@ -111,6 +171,7 @@ export function createHttpRequestNode(options: {
 }
 
 export const conditionNode: WorkflowNodeRegistration = {
+  testSafe: true,
   descriptor: {
     type: 'workflow:condition',
     version: 1,
@@ -154,6 +215,7 @@ export const conditionNode: WorkflowNodeRegistration = {
 }
 
 export const resultNode: WorkflowNodeRegistration = {
+  testSafe: true,
   descriptor: {
     type: 'workflow:result',
     version: 1,
@@ -168,12 +230,15 @@ export const resultNode: WorkflowNodeRegistration = {
         options: ['info', 'success', 'warning', 'error']
       }
     ],
-    inputs: [{ key: 'value', label: 'Result data', type: 'json' }],
+    inputs: [
+      { key: 'value', label: 'Result data', type: 'json' },
+      { key: 'message', label: 'Message from previous output', type: 'string' }
+    ],
     ports: []
   },
   execute: ({ config, inputs }) => ({
     port: null,
-    output: { message: config.message, tone: config.tone ?? 'info', ...inputs }
+    output: { tone: config.tone ?? 'info', ...inputs, message: inputs.message ?? config.message }
   })
 }
 
@@ -212,6 +277,7 @@ function matchesCondition(
 }
 
 export const logicNode: WorkflowNodeRegistration = {
+  testSafe: true,
   descriptor: {
     type: 'workflow:logic',
     version: 1,
@@ -303,11 +369,13 @@ export const humanInputNode: WorkflowNodeRegistration = {
         optionLabels: { text: 'Text', number: 'Number', boolean: 'Yes / No' }
       }
     ],
+    inputs: [{ key: 'prompt', label: 'Prompt from previous output', type: 'string' }],
     outputs: [{ key: 'payload', label: 'Submitted data', type: 'json', required: true }],
     ports: [{ id: 'submitted', label: 'Submitted' }]
   },
-  execute({ config }) {
-    const { label, message, type } = config
+  execute({ config, inputs }) {
+    const { label, type } = config
+    const message = inputs.prompt ?? config.message
     if (
       typeof label !== 'string' ||
       typeof message !== 'string' ||
@@ -321,6 +389,7 @@ export const humanInputNode: WorkflowNodeRegistration = {
 }
 
 export const inputNode: WorkflowNodeRegistration = {
+  testSafe: true,
   descriptor: {
     type: 'workflow:input',
     version: 1,
@@ -346,6 +415,7 @@ const bodyWorkflowField = {
 const maxRepeatCount = 100
 
 export const iterationNode: WorkflowNodeRegistration = {
+  testSafe: true,
   descriptor: {
     type: 'workflow:iteration',
     version: 1,
@@ -375,6 +445,7 @@ export const iterationNode: WorkflowNodeRegistration = {
 }
 
 export const loopNode: WorkflowNodeRegistration = {
+  testSafe: true,
   descriptor: {
     type: 'workflow:loop',
     version: 1,
@@ -395,7 +466,7 @@ export const loopNode: WorkflowNodeRegistration = {
       { id: 'limit', label: 'Limit reached' }
     ]
   },
-  async execute({ config, runBody }) {
+  async execute({ config, runBody, loopProgress }) {
     const { workflowId, maxCount, conditions = [] } = config
     if (!isId(workflowId) || !runBody) throw new Error('Loop requires a body workflow')
     if (
@@ -407,8 +478,8 @@ export const loopNode: WorkflowNodeRegistration = {
       throw new Error('Loop count must be an integer between 1 and 100')
     }
     if (!isLogicConditions(conditions)) throw new Error('Invalid loop conditions')
-    let last: JsonValue = null
-    for (let index = 0; index < maxCount; index++) {
+    let last: JsonValue = loopProgress?.previous ?? null
+    for (let index = loopProgress?.index ?? 0; index < maxCount; index++) {
       last = await runBody(workflowId, { index, previous: last })
       if (conditions.length && conditions.every((condition) => matchesCondition(last, condition))) {
         return { port: 'done', output: { last, count: index + 1 } }
@@ -417,3 +488,16 @@ export const loopNode: WorkflowNodeRegistration = {
     return { port: conditions.length ? 'limit' : 'done', output: { last, count: maxCount } }
   }
 }
+
+export const builtinWorkflowNodes: readonly WorkflowNodeRegistration[] = [
+  logicNode,
+  humanInputNode,
+  iterationNode,
+  loopNode,
+  mapJsonNode,
+  templateNode,
+  waitNode,
+  inputNode,
+  waitForCallNode,
+  resultNode
+]

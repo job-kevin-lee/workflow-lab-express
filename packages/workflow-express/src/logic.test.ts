@@ -235,14 +235,16 @@ test('Invalid bodies are rejected at run start and the same segment deadline cov
     ],
     [edge('ask', 'submitted', 'end')]
   )
-  const tail = [node('done', 'test:end'), node('limit', 'test:end')]
-  const edges = [edge('loop', 'done', 'done'), edge('loop', 'limit', 'limit')]
-  await save('invalid-body', [loop('unavailable-body', 3), ...tail], edges)
-  const invalid = await start('invalid-body')
+  await save(
+    'invalid-body',
+    [node('list', 'test:input'), iteration('unavailable-body'), node('end', 'test:end')],
+    [edge('list', 'next', 'each'), edge('each', 'next', 'end')]
+  )
+  const invalid = await start('invalid-body', { items: { items: ['a'] } })
   expect(invalid.status).toBe(422)
   expect((await invalid.json()).issues).toContainEqual({
     code: 'invalid_body_workflow',
-    nodeId: 'loop',
+    nodeId: 'each',
     field: 'workflowId'
   })
   expect(await store.getRun('invalid-body')).toBeNull()
@@ -251,6 +253,8 @@ test('Invalid bodies are rejected at run start and the same segment deadline cov
     [node('wait', 'workflow:wait', { seconds: 0.08 }), node('end', 'test:end')],
     [edge('wait', 'next', 'end')]
   )
+  const tail = [node('done', 'test:end'), node('limit', 'test:end')]
+  const edges = [edge('loop', 'done', 'done'), edge('loop', 'limit', 'limit')]
   await save('loop-timeout', [loop('slow-body', 8), ...tail], edges)
   const timeout: WorkflowRun = await (await start('loop-timeout', {}, '/limited')).json()
   expect(timeout).toMatchObject({
