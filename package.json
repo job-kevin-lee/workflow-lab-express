@@ -1,5 +1,5 @@
 {
-  "name": "react-workflow-lab",
+  "name": "workflow-lab-express",
   "private": true,
   "packageManager": "bun@1.4.4",
   "workspaces": ["packages/*", "projects/workflow-demo"],

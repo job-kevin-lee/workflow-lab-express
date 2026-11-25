@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "react-workflow-lab",
+      "name": "workflow-lab-express",
       "devDependencies": {
         "@types/node": "22.20.1",
         "typescript": "5.9.3",
