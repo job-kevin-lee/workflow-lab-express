@@ -1,4 +1,4 @@
-# Workflow Lab
+# React Workflow Lab
 
 Build and run workflows in a visual editor. Workflow Lab includes an Express workflow engine, a React canvas, and a SQLite-backed demo. Create a workflow with one Start, connect nodes, configure inputs and branches, and inspect each step in Trace Log.
 
@@ -7,8 +7,8 @@ Build and run workflows in a visual editor. Workflow Lab includes an Express wor
 Install [Bun](https://bun.com/) 1.4 or later and run:
 
 ```sh
-git clone https://github.com/job-kevin-lee/workflow-lab.git
-cd workflow-lab
+git clone https://github.com/job-kevin-lee/react-workflow-lab.git
+cd react-workflow-lab
 bun install --frozen-lockfile
 bun run build
 bun run start
@@ -52,7 +52,7 @@ mkdir -p .packs
 In your npm project, install both tarballs in the same command. Replace the example path with your clone's location.
 
 ```sh
-npm install /path/to/workflow-lab/.packs/ideawithai-workflow-express-0.1.0.tgz /path/to/workflow-lab/.packs/ideawithai-workflow-react-0.1.0.tgz express@5 react@19 react-dom@19
+npm install /path/to/react-workflow-lab/.packs/ideawithai-workflow-express-0.1.0.tgz /path/to/react-workflow-lab/.packs/ideawithai-workflow-react-0.1.0.tgz express@5 react@19 react-dom@19
 ```
 
 Mount the API in your Express app.
