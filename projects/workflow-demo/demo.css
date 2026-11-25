@@ -1,0 +1,284 @@
+:root {
+  color-scheme: only light;
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', system-ui, sans-serif;
+  --demo-surface: #f1f1f4;
+  --demo-border: #d8d8df;
+  --demo-control-line: #c9cad2;
+  --demo-text: #202126;
+  --demo-muted: #5c5e69;
+  --demo-accent: #005fcb;
+  --demo-control: #fff;
+  --demo-hover: #e8e9ee;
+  color: var(--demo-text);
+  background: var(--demo-surface);
+}
+
+body {
+  margin: 0;
+}
+
+.demo {
+  display: flex;
+  min-height: 100dvh;
+  flex-direction: column;
+}
+
+.demo-heading {
+  box-sizing: border-box;
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px 16px;
+  min-height: 45px;
+  padding: 6px 13px;
+  border-bottom: 1px solid var(--demo-border);
+  background: linear-gradient(#fbfbfc, var(--demo-surface));
+  font-size: 12px;
+}
+.demo-heading h1 {
+  margin: 0;
+  padding-inline-end: 13px;
+  border-inline-end: 1px solid var(--demo-border);
+  font-size: 13px;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+.demo-navigation,
+.demo-document-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.demo-workflow-document {
+  flex: 1 1 155px;
+  min-width: 0;
+}
+.demo-workflow-document:empty {
+  display: none;
+}
+.demo-document-actions {
+  flex-wrap: wrap;
+  margin-inline-start: auto;
+}
+.demo-heading :is(button, select),
+.demo-switch-warning button,
+.demo-dialog :is(button, input),
+.demo-empty button {
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--demo-text);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+.demo-heading :is(button, select):focus-visible,
+.demo-switch-warning button:focus-visible,
+.demo-dialog :is(button, input):focus-visible,
+.demo-empty button:focus-visible {
+  outline: 2px solid var(--demo-accent);
+  outline-offset: -2px;
+}
+.demo-heading .demo-library-trigger {
+  anchor-name: --demo-workflows;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding-inline: 7px;
+  background: transparent;
+}
+.demo-library-trigger:hover,
+.demo-navigation:has(.demo-library:popover-open) .demo-library-trigger {
+  background: var(--demo-hover);
+}
+.demo-chevron {
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border: solid currentColor;
+  border-width: 0 1px 1px 0;
+  color: var(--demo-muted);
+  rotate: 45deg;
+}
+.demo-library {
+  box-sizing: border-box;
+  position: fixed;
+  position-anchor: --demo-workflows;
+  inset: 46px auto auto 13px;
+  top: calc(anchor(bottom, 38px) + 6px);
+  left: anchor(left, 13px);
+  width: min(258px, calc(100vw - 26px));
+  max-height: calc(100dvh - 58px);
+  margin: 0;
+  padding: 5px;
+  overflow: auto;
+  border: 1px solid var(--demo-border);
+  border-radius: 9px;
+  background: #fcfcfd;
+  color: var(--demo-text);
+  box-shadow:
+    0 1px 2px #24233318,
+    0 8px 24px #24233326;
+}
+.demo-library-group + .demo-library-group {
+  margin-top: 5px;
+  padding-top: 4px;
+  border-top: 1px solid var(--demo-border);
+}
+.demo-library-group h2 {
+  margin: 5px 8px 3px;
+  color: var(--demo-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+.demo-library button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  gap: 6px;
+  background: transparent;
+  text-align: start;
+}
+.demo-library button span {
+  overflow-wrap: anywhere;
+}
+.demo-library button:enabled:hover {
+  background: var(--demo-hover);
+}
+.demo-library button:disabled,
+.demo-dialog button:disabled,
+.demo-document-actions button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.demo button.demo-destructive,
+.demo-dialog .demo-destructive {
+  color: #a52338;
+}
+.demo-library-group button[aria-current='true'] {
+  background: color-mix(in srgb, var(--demo-accent) 12%, transparent);
+  color: var(--demo-accent);
+}
+
+.demo .wf-editor {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+}
+.demo .wf-workspace {
+  flex: 1;
+}
+
+.demo-dialog {
+  box-sizing: border-box;
+  width: min(400px, calc(100% - 32px));
+  padding: 19px;
+  border: 1px solid var(--demo-border);
+  border-radius: 12px;
+  background: #fcfcfd;
+  color: var(--demo-text);
+  box-shadow: 0 12px 40px #24233330;
+  font-size: 13px;
+}
+.demo-dialog::backdrop {
+  background: #24233342;
+}
+.demo-dialog h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+.demo-dialog label {
+  display: grid;
+  gap: 5px;
+  color: var(--demo-muted);
+}
+.demo-dialog p {
+  overflow-wrap: anywhere;
+}
+.demo-dialog input {
+  cursor: text;
+}
+.demo-dialog :is(button, input),
+.demo-document-actions button,
+.demo-empty button {
+  border-color: var(--demo-control-line);
+  background: var(--demo-control);
+}
+.demo-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 16px;
+}
+.demo :is(.demo-dialog, .demo-document-actions) button.demo-primary {
+  border-color: #0059c3;
+  background: linear-gradient(#1474e5, #0061d0);
+  color: white;
+}
+.demo-dialog button:not(.demo-primary):enabled:hover,
+.demo-document-actions button:not(.demo-primary):enabled:hover,
+.demo-empty button:enabled:hover {
+  background: var(--demo-hover);
+}
+.demo-empty {
+  align-self: center;
+  margin-block: auto;
+  padding: 20px;
+  text-align: center;
+  color: var(--demo-muted);
+  font-size: 13px;
+}
+
+@media (min-width: 781px) {
+  .demo .wf-workspace {
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .demo .wf-panel {
+    max-height: none;
+  }
+}
+
+.demo-switch-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--demo-border);
+  background: #fff7eb;
+  color: #754812;
+  font-size: 12px;
+}
+.demo-switch-warning div {
+  margin-inline-end: auto;
+}
+.demo-switch-warning p {
+  margin: 2px 0 0;
+}
+.demo-switch-warning button {
+  color: inherit;
+  background: var(--demo-control);
+  border-color: #d8b881;
+}
+.demo-switch-warning button:hover {
+  background: #fff0d2;
+}
+
+@media (max-width: 510px) {
+  .demo-workflow-document {
+    flex-basis: 90px;
+  }
+  .demo-library {
+    left: 13px;
+  }
+  .demo-document-actions {
+    margin-inline-start: 0;
+  }
+}
