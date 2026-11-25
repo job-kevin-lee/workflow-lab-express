@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build": "bun run --filter @ideawithai/workflow-express build && bun run --filter @ideawithai/workflow-react build && bun run --filter @ideawithai/workflow-demo build",
+    "pack:packages": "node scripts/pack-packages.mjs",
     "start": "bun run --filter @ideawithai/workflow-demo start",
     "smoke:packages": "node scripts/smoke-packages.mjs",
     "test": "bun test packages/workflow-express packages/workflow-react",

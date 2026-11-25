@@ -12,6 +12,8 @@
   "bugs": "https://github.com/job-kevin-lee/workflow-lab-express/issues",
   "files": [
     "dist",
+    "src/**/*.ts",
+    "src/**/*.tsx",
     "styles.css"
   ],
   "exports": {

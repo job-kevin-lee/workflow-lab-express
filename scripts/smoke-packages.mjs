@@ -1,45 +1,122 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join, resolve } from 'node:path'
+import { packPackages, repo } from './pack-packages.mjs'
 
-const repo = fileURLToPath(new URL('../', import.meta.url))
+const paths = process.argv.slice(2)
+if (paths.length !== 0 && paths.length !== 2)
+  throw new Error('Usage: smoke-packages.mjs [express.tgz react.tgz]')
+
 const consumer = mkdtempSync(join(tmpdir(), 'workflow-package-smoke-'))
-const run = (file, args, cwd = consumer) => execFileSync(file, args, { cwd, stdio: 'inherit' })
-const write = (file, data) => writeFileSync(join(consumer, file), data)
+const serverProject = join(consumer, 'express-app')
+const editorProject = join(consumer, 'react-app')
+const run = (file, args, cwd) => execFileSync(file, args, { cwd, stdio: 'inherit' })
+const write = (cwd, file, data) => writeFileSync(join(cwd, file), data)
 const readManifest = (directory) =>
   JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
 
+function npmInstall(directory, packages) {
+  mkdirSync(directory)
+  write(directory, 'package.json', JSON.stringify({ private: true, type: 'module' }))
+  run('npm', ['install', '--no-audit', '--no-fund', '--engine-strict', ...packages], directory)
+}
+
+function compile(directory, source, options = []) {
+  run(
+    process.execPath,
+    [
+      'node_modules/typescript/bin/tsc',
+      source,
+      '--strict',
+      '--target',
+      'ES2022',
+      '--module',
+      'NodeNext',
+      '--outDir',
+      'compiled',
+      ...options
+    ],
+    directory
+  )
+}
+
+function checkSources(project, workspace) {
+  const installed = join(project, 'node_modules', '@ideawithai', workspace)
+  const dist = join(installed, 'dist')
+  const maps = readdirSync(dist).filter((file) => file.endsWith('.map'))
+  assert.ok(
+    maps.some((file) => file.endsWith('.js.map')),
+    `${workspace} runtime source maps`
+  )
+  assert.ok(
+    maps.some((file) => file.endsWith('.d.ts.map')),
+    `${workspace} declaration maps`
+  )
+  for (const map of maps) {
+    const { sources } = JSON.parse(readFileSync(join(dist, map), 'utf8'))
+    for (const source of sources) {
+      assert.ok(
+        existsSync(resolve(dist, source)),
+        `${workspace} ${map} references missing source ${source}`
+      )
+    }
+  }
+  const packagedSources = readdirSync(join(installed, 'src'), {
+    recursive: true,
+    withFileTypes: true
+  }).filter((entry) => entry.isFile())
+  for (const { name } of packagedSources) {
+    assert.match(name, /\.tsx?$/, `${workspace} shipped unexpected source ${name}`)
+    assert.doesNotMatch(name, /\.test\.tsx?$/, `${workspace} shipped development test ${name}`)
+  }
+  return readManifest(installed)
+}
+
 try {
-  const tarballs = ['workflow-express', 'workflow-react'].map((name) => {
-    const directory = join(repo, 'packages', name)
-    const filename = `${name}.tgz`
-    run('bun', ['pm', 'pack', '--filename', join(consumer, filename), '--quiet'], directory)
-    return `./${filename}`
-  })
+  const [expressTarball, reactTarball] = paths.length
+    ? paths.map((path) => resolve(path))
+    : packPackages(consumer)
 
   const { dependencies, devDependencies } = readManifest(join(repo, 'projects/workflow-demo'))
   const { devDependencies: tooling } = readManifest(repo)
-  write('package.json', JSON.stringify({ private: true, type: 'module' }))
-  run('npm', [
-    'install',
-    '--no-audit',
-    '--no-fund',
-    '--engine-strict',
-    ...tarballs,
+  npmInstall(serverProject, [
+    expressTarball,
     `express@${dependencies.express}`,
+    `@types/node@${tooling['@types/node']}`,
+    `typescript@${tooling.typescript}`
+  ])
+  npmInstall(editorProject, [
+    expressTarball,
+    reactTarball,
     `react@${dependencies.react}`,
     `react-dom@${dependencies['react-dom']}`,
-    `@types/node@${tooling['@types/node']}`,
     `@types/react@${devDependencies['@types/react']}`,
     `@types/react-dom@${devDependencies['@types/react-dom']}`,
     `typescript@${tooling.typescript}`,
     `vite@${devDependencies.vite}`
   ])
+  assert.ok(!existsSync(join(serverProject, 'node_modules', 'react')))
+  assert.ok(!existsSync(join(editorProject, 'node_modules', 'express')))
+  const expressPackage = checkSources(serverProject, 'workflow-express')
+  const reactPackage = checkSources(editorProject, 'workflow-react')
+  assert.equal(
+    reactPackage.dependencies[expressPackage.name],
+    expressPackage.version,
+    'React must depend on the Express version packaged with it'
+  )
 
   write(
+    serverProject,
     'server.ts',
     `
 import assert from 'node:assert/strict'
@@ -103,8 +180,13 @@ try {
 }
 `
   )
-  write('index.html', '<div id="app"></div><script type="module" src="/client.tsx"></script>')
   write(
+    editorProject,
+    'index.html',
+    '<div id="app"></div><script type="module" src="/client.tsx"></script>'
+  )
+  write(
+    editorProject,
     'client.tsx',
     `
 import { createRoot } from 'react-dom/client'
@@ -119,6 +201,7 @@ createRoot(root).render(<WorkflowEditor {...props} />)
 `
   )
   write(
+    editorProject,
     'vite.config.mjs',
     `
 export default {
@@ -137,27 +220,22 @@ export default {
 `
   )
 
-  run(process.execPath, [
-    'node_modules/typescript/bin/tsc',
-    'server.ts',
-    'client.tsx',
-    '--strict',
-    '--target',
-    'ES2022',
-    '--module',
-    'NodeNext',
+  compile(serverProject, 'server.ts')
+  compile(editorProject, 'client.tsx', [
     '--jsx',
     'react-jsx',
     '--types',
     'vite/client',
-    '--noUncheckedSideEffectImports',
-    '--outDir',
-    'compiled'
+    '--noUncheckedSideEffectImports'
   ])
-  run(process.execPath, ['compiled/server.js'])
-  run(process.execPath, ['node_modules/vite/bin/vite.js', 'build', '--logLevel', 'warn'])
+  run(process.execPath, ['compiled/server.js'], serverProject)
+  run(
+    process.execPath,
+    ['node_modules/vite/bin/vite.js', 'build', '--logLevel', 'warn'],
+    editorProject
+  )
 
-  const assets = join(consumer, 'dist', 'assets')
+  const assets = join(editorProject, 'dist', 'assets')
   const css = readdirSync(assets)
     .filter((file) => file.endsWith('.css'))
     .map((file) => readFileSync(join(assets, file), 'utf8'))
@@ -165,7 +243,7 @@ export default {
   assert.match(css, /\.wf-editor\b/)
   assert.match(css, /\.react-flow__node\b/)
   console.log(
-    'Packed packages passed npm installation, TypeScript, Express execution, and browser bundling.'
+    'Packed packages passed separate npm installs, TypeScript, Express execution, and browser bundling.'
   )
 } finally {
   rmSync(consumer, { recursive: true, force: true })

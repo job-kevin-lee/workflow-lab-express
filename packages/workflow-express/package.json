@@ -14,7 +14,9 @@
     "node": ">=22"
   },
   "files": [
-    "dist"
+    "dist",
+    "src/**/*.ts",
+    "!src/**/*.test.ts"
   ],
   "exports": {
     ".": {

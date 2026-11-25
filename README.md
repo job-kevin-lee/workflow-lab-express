@@ -14,18 +14,19 @@ The Express package runs on Node.js 22 or later with Express 5. The editor uses 
 ```sh
 git clone https://github.com/job-kevin-lee/workflow-lab-express.git
 cd workflow-lab-express
-bun install --frozen-lockfile
-bun run --filter @ideawithai/workflow-express build
-bun run --filter @ideawithai/workflow-react build
-mkdir -p .packs
-(cd packages/workflow-express && bun pm pack --destination ../../.packs)
-(cd packages/workflow-react && bun pm pack --destination ../../.packs)
+bun run pack:packages
 ```
 
-For an Express-only project, install the Express tarball and `express@5`. To add the editor, install both tarballs in the same npm command so the editor can resolve its matching Express package. Replace the example paths with your clone's location.
+The pack command installs locked dependencies and builds in a temporary workspace, then writes the versioned tarballs to `.packs/`. Install the runtime in your Express project. Replace the example paths with your clone's location.
 
 ```sh
-npm install /path/to/workflow-lab-express/.packs/ideawithai-workflow-express-0.1.0.tgz /path/to/workflow-lab-express/.packs/ideawithai-workflow-react-0.1.0.tgz express@5 react@19 react-dom@19
+npm install /path/to/workflow-lab-express/.packs/ideawithai-workflow-express-0.1.0.tgz express@5
+```
+
+Install both tarballs together in the React project so the editor can resolve the browser-safe workflow schema from the matching Express package.
+
+```sh
+npm install /path/to/workflow-lab-express/.packs/ideawithai-workflow-express-0.1.0.tgz /path/to/workflow-lab-express/.packs/ideawithai-workflow-react-0.1.0.tgz react@19 react-dom@19
 ```
 
 Mount the API in your Express app.
@@ -110,7 +111,7 @@ Open **Triggers** to enable an interval schedule or copy a webhook URL. Each tri
 
 ## Checks
 
-The package smoke test uses Node.js 22.12 or later, npm, and Bun. It packs both libraries, installs them into a clean npm project, runs a custom node on Express, and builds the React editor with its CSS.
+The package smoke test uses Node.js 22.12 or later, npm, and Bun. It installs the runtime and editor in separate npm projects, runs a custom node on Express, and builds the React editor with its CSS.
 
 ```sh
 bun run build
@@ -118,3 +119,5 @@ bun run typecheck
 bun run test
 bun run smoke:packages
 ```
+
+Pass the two tarball paths to `bun run smoke:packages` to test existing archives. This validates the exact files you plan to distribute, including the source and declaration maps that support Go to Definition in TypeScript editors.
